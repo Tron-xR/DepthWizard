@@ -1,0 +1,65 @@
+# Unity (root project — separate from unity-client/)
+Assets/
+Packages/
+ProjectSettings/
+Library/
+Temp/
+UserSettings/
+Logs/
+backups/
+
+# Unity client build artifacts
+unity-client/Library/
+unity-client/Temp/
+unity-client/Logs/
+unity-client/UserSettings/
+unity-client/build/
+unity-client/obj/
+
+# Frozen server inside client StreamingAssets (too large + long paths)
+unity-client/Assets/StreamingAssets/
+
+# Server packaging artifacts
+server/dist/
+server/build/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+
+# ML models & weights (too large for git)
+models/
+training_data/
+decoder_training/checkpoints/
+decoder_training/checkpoints_tmp/
+
+# Server cached outputs
+server/data/
+
+# Large test assets
+sample_images/
+
+# Process logs
+gather.pid
+gather_run.*
+terrain_*.png
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Environment / secrets
+.env
+.env.*
+
+# Old design docs & config (replaced by README.md)
+*.md
+!README.md
+opencode.json
+AGENTS.md
+server/DEPLOYMENT.md
+server/app/DEPLOYMENT.md

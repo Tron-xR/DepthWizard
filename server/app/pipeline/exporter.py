@@ -1,0 +1,93 @@
+"""Export of pipeline outputs: unified heightmap (PNG/EXR for Unity), source
+texture, and georeferenced DSM GeoTIFF. Also computes world dimensions for the
+Unity mesh generator from cell size / bounds.
+"""
+from __future__ import annotations
+
+import math
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+
+
+def _normalize_8bit(arr: np.ndarray) -> np.ndarray:
+    lo, hi = float(arr.min()), float(arr.max())
+    if hi - lo == 0:
+        return np.zeros_like(arr, dtype="uint8")
+    return ((arr - lo) / (hi - lo) * 255).astype("uint8")
+
+
+def export_heightmap(elevation: np.ndarray, path: Path) -> dict:
+    """Write an 8-bit grayscale heightmap PNG for the Unity mesh generator.
+
+    Returns min/max elevation so Unity can de-normalize.
+    ponytail: 8-bit quantization (~1% of range) is fine for visualization; a
+    16-bit I;16 PNG is unreliable in Unity's runtime DownloadHandlerTexture.
+    Revisit if a sub-meter absolute DSM ever needs full precision.
+    """
+    from PIL import Image
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    arr8 = _normalize_8bit(elevation)
+    Image.fromarray(arr8, "L").save(path, "PNG")
+    return {"min_elev": float(elevation.min()), "max_elev": float(elevation.max())}
+
+
+def export_texture(rgb: np.ndarray, path: Path) -> None:
+    """Write the source RGB as an 8-bit texture for the mesh. rgb is H,W,3."""
+    from PIL import Image
+
+    rgb8 = np.clip(rgb, 0, 255).astype("uint8") if rgb.max() <= 255 else \
+        (np.clip(rgb, 0.0, 1.0) * 255).astype("uint8")
+    Image.fromarray(rgb8, "RGB").save(path, "PNG")
+
+
+def export_geotiff(elevation: np.ndarray, crs: str, transform, bounds, path: Path) -> None:
+    """Write a georeferenced DSM GeoTIFF with correct CRS/transform."""
+    import rasterio
+    from rasterio.transform import from_origin
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    transform = transform if transform is not None else from_origin(0, elevation.shape[0], 1, 1)
+    profile = {
+        "driver": "GTiff",
+        "height": elevation.shape[0],
+        "width": elevation.shape[1],
+        "count": 1,
+        "dtype": "float32",
+        "crs": crs,
+        "transform": transform,
+    }
+    with rasterio.open(path, "w", **profile) as dst:
+        dst.write(elevation.astype("float32"), 1)
+
+
+def compute_world_dimensions(height: int, width: int,
+                             cell_size: Optional[float],
+                             bounds: Optional[list] = None,
+                             crs: Optional[str] = None) -> tuple:
+    """Return (world_width, world_depth) in meters for Unity mesh scaling.
+
+    Georeferenced (cell_size set): scale the raster to real meters.
+    - Geographic CRS (e.g. EPSG:4326): bounds are degrees; convert each span
+      to meters using 111320 m/deg lat and 111320*cos(lat) m/deg lon so a
+      30N tile does not render as a collapsed near-1D strip.
+    - Projected CRS: pixel size is already metric, so width*cell_size works.
+    Otherwise fall back to a legible 1000-unit square (relative mode).
+    """
+    if cell_size and cell_size > 0:
+        if bounds and crs and _is_geographic(crs):
+            minx, miny, maxx, maxy = bounds
+            center_lat = math.radians((miny + maxy) / 2.0)
+            return (float((maxx - minx) * 111320.0 * math.cos(center_lat)),
+                    float((maxy - miny) * 111320.0))
+        return float(width * cell_size), float(height * cell_size)
+    return 1000.0, 1000.0
+
+
+def _is_geographic(crs: str) -> bool:
+    from rasterio.crs import CRS
+
+    c = CRS.from_user_input(crs)
+    return bool(c) and c.is_geographic
