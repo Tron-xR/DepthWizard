@@ -1,12 +1,12 @@
 # Unity (root project — separate from unity-client/)
-Assets/
-Packages/
-ProjectSettings/
-Library/
-Temp/
-UserSettings/
-Logs/
-backups/
+/Assets/
+/Packages/
+/ProjectSettings/
+/Library/
+/Temp/
+/UserSettings/
+/Logs/
+/backups/
 
 # Unity client build artifacts
 unity-client/Library/
