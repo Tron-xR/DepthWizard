@@ -2,7 +2,6 @@
 name = "depthwizard-server"
 version = "0.1.0"
 description = "DepthWizard local inference server - monocular depth -> elevation (DEM/DSM) extraction"
-readme = "README.md"
 requires-python = ">=3.10,<3.11"
 dependencies = [
     "fastapi>=0.110",
