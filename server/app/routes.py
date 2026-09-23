@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 
 from . import config, db, jobs
 from .errors import DepthWizardError
-from .pipeline import uploader, depth, evaluation
+from .pipeline import uploader, depth, evaluation, artifacts
 from .schemas import (
     ErrorResponse,
     EvaluationResponse,
@@ -109,12 +109,18 @@ def _result_response(res: dict, upload: dict) -> ResultResponse:
 
 
 @router.get("/validate/{job_id}", response_model=ValidationResponse)
-def validate(job_id: str) -> ValidationResponse:
+def validate(job_id: str, save_artifacts: bool = False) -> ValidationResponse:
+    """Validate a processed job's absolute DSM against the reference DEM.
+
+    save_artifacts:
+        opt-in prediction-artifact export (final persisted DSM only) under
+        DEPTHWIZARD_OUTPUT_DIR. Off by default.
+    """
     job = db.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=ErrorResponse(error="not_found", message="Job not found").model_dump())
     try:
-        data = jobs.run_validation(job_id)
+        data = jobs.run_validation(job_id, save_artifacts=save_artifacts)
     except DepthWizardError as e:
         raise HTTPException(status_code=400, detail=ErrorResponse(error=e.error_code, message=e.message).model_dump())
     except Exception as e:
@@ -158,7 +164,8 @@ def _to_2d_surface(arr: np.ndarray) -> np.ndarray:
 async def evaluate(image: UploadFile = File(...),
                    dem: UploadFile = File(...),
                    mode: str = Form("calibrated"),
-                   include_visualization: bool = Form(False)) -> EvaluationResponse:
+                   include_visualization: bool = Form(False),
+                   save_artifacts: bool = Form(False)) -> EvaluationResponse:
     """Evaluate a matched RGB + ground-truth DEM pair (no georeferencing needed).
 
     mode:
@@ -170,6 +177,13 @@ async def evaluate(image: UploadFile = File(...),
       opt-in 3-panel comparison PNG (RGB | ground truth | calibrated prediction,
       shared elevation colormap) saved to /files/<id>/comparison.png, returned
       as comparison_image_url. Only produced in calibrated, non-degenerate mode.
+
+    save_artifacts:
+      opt-in prediction-artifact export under DEPTHWIZARD_OUTPUT_DIR
+      (<root>/<backend>/<input-stem>/): exact-float predicted_depth.npy,
+      raw/relative/calibrated stage .npy's, a visualization-only .png, a
+      georeferenced single-band float .tif when the input was georeferenced,
+      and metrics.json. Off by default; never affects the reported metrics.
     """
     if mode not in ("calibrated", "relative"):
         raise HTTPException(
@@ -186,7 +200,8 @@ async def evaluate(image: UploadFile = File(...),
 
         rgb_arr, rgb_meta = uploader.load_raster(image_path)
         rgb = jobs._to_rgb(rgb_arr)
-        rdsm = depth.infer_relative_dsm(rgb)
+        capture: dict = {}
+        rdsm = depth.infer_relative_dsm(rgb, capture=capture)
         rdsm = _to_2d_surface(np.asarray(rdsm))
 
         with rasterio.open(dem_path) as src:
@@ -211,6 +226,36 @@ async def evaluate(image: UploadFile = File(...),
     result = evaluation.evaluate_prediction_truth(rdsm, dem_2d, nodata=nodata, mode=mode)
     predicted_elevation = result.pop("predicted_elevation", None)
     ground_truth = result.pop("ground_truth", None)
+
+    if save_artifacts:
+        # The metrics dump mirrors the EXACT response fields reported below;
+        # exporting artifacts must never alter them.
+        artifact_metrics = {k: v for k, v in result.items()
+                            if k in {"mae", "rmse", "correlation",
+                                     "correlation_reason", "valid_pixels",
+                                     "total_pixels", "held_out_pixel_count",
+                                     "calibration_status", "calibration_warning",
+                                     "calibration_scale", "calibration_offset"}}
+        try:
+            artifacts.export_prediction_artifacts(
+                out_root=config.OUTPUT_DIR,
+                backend=depth.backend_slug(),
+                model_identifier=depth.model_identifier(),
+                input_filename=image.filename or "image.png",
+                raw=capture.get("raw"),
+                relative=rdsm,
+                calibrated=predicted_elevation,
+                ground_truth=ground_truth,
+                metrics=artifact_metrics,
+                crs=rgb_meta.get("crs"),
+                transform=rgb_meta.get("transform"),
+                bounds=rgb_meta.get("bounds"),
+            )
+        except (ValueError, OSError) as e:
+            raise HTTPException(status_code=400,
+                                detail=ErrorResponse(error="evaluation_failed",
+                                                     message=f"artifact export failed: {e}").model_dump())
+
     response = EvaluationResponse(**result)
 
     if include_visualization and predicted_elevation is not None:

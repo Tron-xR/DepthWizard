@@ -1,5 +1,6 @@
 using System;
 using UnityEngine;
+using DepthWizard.UI;
 
 namespace DepthWizard.Core
 {
@@ -53,6 +54,25 @@ namespace DepthWizard.Core
                     onReady: () => Debug.Log("Server ready"),
                     onError: err => Debug.LogError($"Server error: {err}")
                 ));
+            }
+
+            // Dev/test hook only: launch with -loadJob <jobId> to jump straight
+            // to an existing result without the file-picker/upload flow. Reuses
+            // the same ProcessingScreen poll -> Viewer path as a real upload.
+            string[] args = Environment.GetCommandLineArgs();
+            for (int i = 0; i < args.Length - 1; i++)
+            {
+                if (args[i] == "-loadJob")
+                {
+                    var processing = UnityEngine.Object.FindFirstObjectByType<
+                        ProcessingScreen>(FindObjectsInactive.Include);
+                    if (processing != null)
+                    {
+                        processing.PendingJobId = args[i + 1];
+                        ShowProcessing();
+                    }
+                    break;
+                }
             }
         }
 

@@ -33,6 +33,43 @@ def get_depth_model() -> Optional[object]:
     return _model_cache.get("model")
 
 
+def backend_slug() -> str:
+    """Short stable label for the ACTIVE backend, used to namespace artifact
+    export directories (outputs/pix2pix, outputs/imele, ...). Derived from the
+    loaded model's class so it can never drift from what actually ran; falls
+    back to the config dispatch order used by _load_model when nothing is
+    loaded yet.
+    """
+    model = _model_cache.get("model")
+    if model is not None:
+        name = type(model).__name__
+        if name == "_TfSavedModel":
+            return "pix2pix"
+        if name == "_ImeleModelBackend":
+            return "imele"
+        if name == "_FinetunedDepthBackend":
+            return "finetuned"
+        return "depth_anything"
+    if config.FINETUNED_MODEL_PATH:
+        return "finetuned"
+    if config.IMELE_MODEL_PATH:
+        return "imele"
+    if config.TF_MODEL_PATH:
+        return "pix2pix"
+    return "depth_anything"
+
+
+def model_identifier() -> str:
+    """Human-readable identifier of whatever model is configured/loaded."""
+    if config.FINETUNED_MODEL_PATH:
+        return config.FINETUNED_MODEL_PATH
+    if config.IMELE_MODEL_PATH:
+        return config.IMELE_MODEL_PATH
+    if config.TF_MODEL_PATH:
+        return config.TF_MODEL_PATH
+    return config.DEFAULT_DEPTH_MODEL
+
+
 class _TfSavedModel:
     """Adapter so a pix2pix SavedModel satisfies the depth-backbone contract.
 
@@ -65,6 +102,16 @@ class _TfSavedModel:
         # the proven-safe fixed grid and resample the prediction back.
         # ponytail: fixed 512 grid; upgrade path = pad to a multiple or retrain
         # the model with variable-size support.
+        #
+        # Point 8 (grid-to-grid resample): the 512² model grid -> native grid
+        # (h,w) is a RESAMPLE of a continuous elevation field, not an alignment
+        # problem - neither grid is georeferenced, the pair is pixel-matched
+        # (model(h,w) == rDSM(h,w), same grid both sides). LANCZOS preserves
+        # smoothness without worst-case mipmapping artifacts; if visible ringing
+        # appears, Image.BILINEAR is a drop-in, but the GAN output is already
+        # bounded so any artifact is far below the DEM's relief. Do not replace
+        # with NEAREST (blocks on smooth elevation) or blindly upscale input RGB
+        # to arbitrary sizes the U-Net cannot concatenate through.
         small = rgb
         if (h, w) != (512, 512):
             small = np.asarray(
@@ -72,6 +119,7 @@ class _TfSavedModel:
                 dtype="float32")
         batch = (small / 127.5 - 1.0)[None, ...]  # training norm: rgb/127.5 - 1
         out = self._infer(**{self._key: self._tf.constant(batch)})
+        # RAW floating-point output: the ONLY transform below is squeeze().
         dem = np.squeeze(list(out.values())[0].numpy()).astype("float32")
         if dem.shape != (h, w):
             dem = np.asarray(Image.fromarray(dem).resize((w, h), Image.LANCZOS),
@@ -223,10 +271,21 @@ def _fallback_rdsm(height: int, width: int) -> np.ndarray:
     return (xx / max(width - 1, 1) * 0.5 + yy / max(height - 1, 1) * 0.5)
 
 
-def infer_relative_dsm(rgb: np.ndarray, *, ensure_real: bool = True) -> np.ndarray:
+def infer_relative_dsm(rgb: np.ndarray, *, ensure_real: bool = True,
+                       capture: Optional[dict] = None) -> np.ndarray:
     """Run depth inference on an RGB array (H,W,3 float or uint8) -> rDSM (H,W) float32.
 
     Returns a 0..1 normalized relative DSM (higher = brighter).
+
+    capture:
+        Optional dict; when given it is filled in-place with
+        ``capture["raw"]``      = the model's raw floating-point output on the
+                                  native input grid, BEFORE depth-sign
+                                  inversion and BEFORE 0..1 normalization, and
+        ``capture["relative"]`` = the same normalized rDSM returned here.
+        Purely observational: no extra inference, no behavior change for
+        callers that don't pass it. Used by the optional prediction-artifact
+        export to expose intermediate stages without re-running the model.
     """
     from PIL import Image
 
@@ -248,20 +307,44 @@ def infer_relative_dsm(rgb: np.ndarray, *, ensure_real: bool = True) -> np.ndarr
         return _fallback_rdsm(h, w)
 
     pil = Image.fromarray(arr.astype("uint8") if arr.max() <= 255 else arr)
+
     # Model outputs inverse depth; invert so higher = higher elevation.
     out = model(pil)
-    depth = out.get("depth")
-    if depth is None and "predicted_depth" in out:
-        depth = out["predicted_depth"]
+    # Prefer the pipeline's NATIVE floating-point output when exposed. The HF
+    # DepthEstimationPipeline's "depth" key is quantized to uint8 0..255 in its
+    # postprocess - a real (if small) precision loss, measured on this pipeline:
+    # 254 vs 255,111 unique rDSM levels, corr(float,uint8)=0.99996,
+    # MAE=0.002, i.e. it does not explain weak calibration but is avoidable.
+    # "predicted_depth" is the raw model tensor; the GAN/IMELE/finetuned
+    # backends only ever return the float "depth" key, so they are unchanged.
+    depth = out.get("predicted_depth")
+    if depth is None:
+        depth = out.get("depth")
     depth = np.asarray(depth, dtype="float32")
+    # ensure 2D (H,W); squeeze any leading singleton band dims
+    if depth.ndim == 3 and depth.shape[0] == 1:
+        depth = depth[0]
+    if depth.ndim > 2:
+        depth = np.squeeze(depth)
+    # Bring a model-grid tensor onto the input image grid (LANCZOS) so the
+    # rest of the pipeline/calibration sees ONE pixel-aligned pair. Backends
+    # that already produce native (h,w) arrays skip this resample.
+    if depth.shape[:2] != (h, w):
+        depth = np.asarray(Image.fromarray(depth).resize((w, h), Image.LANCZOS),
+                           dtype="float32")
+    # Stage A: raw model output on the native grid, still in the model's own
+    # depth convention (not yet sign-flipped, not yet 0..1). Captured before
+    # any transform so callers can inspect the true prediction.
+    if capture is not None:
+        capture["raw"] = depth.copy()
     # HF depth: predicted depth has nearer/bright as high; invert so brighter = higher.
     # Backends already yielding high=bright elev (e.g. the pix2pix GAN) skip this.
     if getattr(model, "invert_depth", True):
         depth = depth * -1.0
-    # ensure 2D (H,W); squeeze any leading singleton band dims
-    if depth.ndim == 3 and depth.shape[0] == 1:
-        depth = depth[0]
-    return _normalize_01(depth)
+    rdsm = _normalize_01(depth)
+    if capture is not None:
+        capture["relative"] = rdsm.copy()
+    return rdsm
 
 
 def _normalize_01(x: np.ndarray) -> np.ndarray:

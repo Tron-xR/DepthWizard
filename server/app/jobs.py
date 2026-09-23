@@ -19,6 +19,7 @@ import numpy as np
 from . import config, db
 from .pipeline import (uploader, depth, calibration as calib,
                        dem_source, exporter, validate as vmod)
+from .pipeline import artifacts
 
 _STAGE_PROGRESS = {
     "loading": 0.05,
@@ -193,8 +194,15 @@ def _calibrate_absolute(rdsm: np.ndarray, upload: dict, meta: dict, result_dir: 
     return abs_dsm, cell_size, str(geotiff)
 
 
-def run_validation(job_id: str) -> dict:
-    """Compare the produced absolute DSM against the reference DEM and store metrics."""
+def run_validation(job_id: str, *, save_artifacts: bool = False) -> dict:
+    """Compare the produced absolute DSM against the reference DEM and store metrics.
+
+    save_artifacts:
+        Opt-in prediction-artifact export of the FINAL persisted prediction
+        (the absolute DSM the renderer consumed). Raw/relative stages are NOT
+        persisted by the job pipeline, so only the final prediction is written
+        (the artifacts layer never re-runs the model).
+    """
     result = db.get_result_by_job(job_id)
     if result is None or not result.get("dsm_geotiff_path"):
         raise ValueError("No absolute DSM available for validation")
@@ -210,6 +218,8 @@ def run_validation(job_id: str) -> dict:
 
     with rasterio.open(result["dsm_geotiff_path"]) as src:
         pred = src.read(1).astype("float32")
+        pred_transform = src.transform
+        pred_crs = str(src.crs) if src.crs else None
 
     ref, rmeta = dem_source.fetch_reference_dem(bounds, crs)
     ref = calib.resample_to_grid(ref, pred.shape)
@@ -220,6 +230,7 @@ def run_validation(job_id: str) -> dict:
     # before holdout persistence existed fall back to the whole-grid comparison
     # rather than failing.
     fit = calib.load_fit(Path(result["heightmap_path"]).parent / "held_out.npz")
+    degenerate_calibration = bool(fit is not None and fit.degenerate)
     if fit is not None and not fit.degenerate \
             and fit.held_relative is not None and fit.held_relative.size >= 2:
         held_pred = fit.scale * fit.held_relative + fit.offset
@@ -229,6 +240,35 @@ def run_validation(job_id: str) -> dict:
     else:
         metrics = vmod.compute_metrics(pred, ref)
         held_out_count = None
+
+    # Calibration health surfaced from the persisted fit. Legacy jobs with no
+    # held_out.npz are None here (no fit), but correlation_reason still applies.
+    calib_status = fit.calibration_status if fit is not None else None
+    calib_warning = fit.calibration_warning if fit is not None else None
+    calib_scale = fit.scale if fit is not None else None
+
+    if save_artifacts:
+        artifact_metrics = {k: v for k, v in {
+            "mae": metrics["mae"], "rmse": metrics["rmse"],
+            "correlation": metrics["correlation"],
+            "correlation_reason": metrics.get("correlation_reason"),
+            "calibration_status": calib_status,
+            "calibration_warning": calib_warning,
+            "calibration_scale": calib_scale,
+            "calibration_offset": (fit.offset if fit is not None else None),
+        }.items() if v is not None}
+        artifacts.export_prediction_artifacts(
+            out_root=config.OUTPUT_DIR,
+            backend=depth.backend_slug(),
+            model_identifier=depth.model_identifier(),
+            input_filename=upload["original_filename"] or f"{job_id}.tif",
+            calibrated=pred,
+            ground_truth=ref,
+            metrics=artifact_metrics,
+            crs=pred_crs,
+            transform=pred_transform,
+            bounds=bounds,
+        )
 
     heat_path = Path(result["heightmap_path"]).parent / "diff_heatmap.png"
     vmod.render_diff_heatmap(pred, ref, heat_path)
@@ -252,8 +292,15 @@ def run_validation(job_id: str) -> dict:
         "rmse": metrics["rmse"],
         "mae": metrics["mae"],
         "correlation": metrics["correlation"],
+        "correlation_reason": metrics.get("correlation_reason"),
         "diff_heatmap_url": f"/files/{job_id}/diff_heatmap.png",
         "held_out_pixel_count": held_out_count,
+        "degenerate_calibration": degenerate_calibration,
+        "calibration_reason": calib.degenerate_reason(fit) if degenerate_calibration else None,
+        "calibration_status": calib_status,
+        "calibration_warning": calib_warning,
+        "calibration_scale": calib_scale,
+        "calibration_offset": (fit.offset if fit is not None else None),
     }
 
 

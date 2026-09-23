@@ -65,6 +65,7 @@ def isolated_db(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CACHE_DIR", data_dir / "cache")
     monkeypatch.setattr(config, "FILES_DIR", data_dir / "files")
     monkeypatch.setattr(config, "DB_PATH", data_dir / "depthwizard.db")
+    monkeypatch.setattr(config, "OUTPUT_DIR", data_dir / "outputs")
     config.ensure_dirs()
     db.init_db()
     yield

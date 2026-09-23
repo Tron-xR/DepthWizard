@@ -9,6 +9,21 @@ namespace DepthWizard.Terrain
         [SerializeField] private MeshRenderer _meshRenderer;
         [SerializeField] private Material _terrainMaterial;
 
+        // When the elevation span is at/near zero (flat / degenerate tile) the
+        // black->white height ramp collapses to a solid black surface, which
+        // reads as a rendering error rather than an intentional flat result.
+        // Render flat meshes in a distinct neutral water-blue instead. The
+        // normal Lerp(black, white, t) colouring is untouched for real relief.
+        private const float _FLAT_ELEV_SPAN_M = 0.5f;
+        private static readonly Color _FlatColor = new Color(0.55f, 0.75f, 0.95f, 1f);
+
+        // Display-only vertical exaggeration, applied to vertex Y AFTER
+        // SmoothHeights. 1.0 = true scale. This value never feeds the server,
+        // /validate, /evaluate, or any metric path — it only scales the mesh
+        // for visibility. The HUD raycast readout divides back by this factor
+        // so reported height/slope stay true-scale.
+        public float verticalExaggeration = 3.0f;
+
         private Mesh _mesh;
         private Mesh _wireMesh;
         private bool _wireframeOn;
@@ -71,7 +86,10 @@ namespace DepthWizard.Terrain
 
             float[] heights = SmoothHeights(
                 SampleHeightmap(heightmap, minElev, maxElev), width, height, 2);
-            float elevRange = Mathf.Max(maxElev - minElev, 0.01f);
+            LogElevationTrace("heightmap", heightmap, minElev, maxElev);
+            LogElevationTrace("heights", heights, minElev, maxElev);
+            float elevSpan = maxElev - minElev;
+            float elevRange = Mathf.Max(elevSpan, 0.01f);
 
             _mesh = new Mesh { name = "Terrain" };
 
@@ -94,24 +112,37 @@ namespace DepthWizard.Terrain
 
                     float wx = nx * worldWidth;
                     float wz = ny * worldDepth;
-                    float wy = heights[i];
+                    float wy = heights[i] * (Mathf.Abs(verticalExaggeration) < 0.001f ? 1f : verticalExaggeration);
 
                     vertices[i] = new Vector3(wx, wy, wz);
                     uvs[i] = new Vector2(nx, ny);
 
-                    float t = (heights[i] - minElev) / elevRange;
-                    colors[i] = Color.Lerp(Color.black, Color.white, t);
+                    if (elevSpan <= _FLAT_ELEV_SPAN_M)
+                    {
+                        // Flat mesh: one tinted colour everywhere instead of a
+                        // black ramp that looks like a broken render.
+                        colors[i] = _FlatColor;
+                    }
+                    else
+                    {
+                        float t = (heights[i] - minElev) / elevRange;
+                        colors[i] = Color.Lerp(Color.black, Color.white, t);
+                    }
                 }
             }
 
             Debug.Log(
-                $"Terrain corners: " +
+                $"Terrain corners: xv={verticalExaggeration:F2}x " +
                 $"(0,0)=({vertices[0].x:F1},{vertices[0].y:F1},{vertices[0].z:F1}) " +
                 $"(w,0)=({vertices[width - 1].x:F1},{vertices[width - 1].y:F1},{vertices[width - 1].z:F1}) " +
                 $"(0,d)=({vertices[width * (height - 1)].x:F1}," +
                 $"{vertices[width * (height - 1)].y:F1},{vertices[width * (height - 1)].z:F1}) " +
                 $"(w,d)=({vertices[width * height - 1].x:F1},{vertices[width * height - 1].y:F1}," +
                 $"{vertices[width * height - 1].z:F1})");
+
+            float[] vY = new float[vertices.Length];
+            for (int i = 0; i < vertices.Length; i++) vY[i] = vertices[i].y;
+            LogElevationTrace("vertices.y", vY, minElev, maxElev);
 
             int[] triangles = new int[(width - 1) * (height - 1) * 6];
             int tri = 0;
@@ -143,6 +174,11 @@ namespace DepthWizard.Terrain
             _mesh.RecalculateNormals();
             _mesh.RecalculateBounds();
             Debug.Log($"Normals: {_mesh.normals.Length}, sample={_mesh.normals[0]}");
+            Debug.Log(
+                $"[elevtrace] mesh.bounds: min.y={_mesh.bounds.min.y:F3} max.y={_mesh.bounds.max.y:F3} " +
+                $"yRange={_mesh.bounds.max.y - _mesh.bounds.min.y:F3} " +
+                $"size={_mesh.bounds.size.x:F1}x{_mesh.bounds.size.y:F1}x{_mesh.bounds.size.z:F1} " +
+                $"vertexCount={_mesh.vertexCount}");
 
             _meshFilter.mesh = _mesh;
 
@@ -177,6 +213,52 @@ namespace DepthWizard.Terrain
                     $"Terrain material: {mat.shader.name}; texture: " +
                     (texture != null ? $"{texture.width}x{texture.height}" : "NONE"));
             }
+        }
+
+        /// <summary>
+        /// Diagnostic trace of the heightmap->mesh elevation path (temporary).
+        /// </summary>
+        private static void LogElevationTrace(string label, Texture2D tex, float minElev, float maxElev)
+        {
+            int w = tex.width, h = tex.height;
+            float[] g = new float[w * h];
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                    g[y * w + x] = tex.GetPixel(x, y).grayscale;
+            Debug.Log($"[elevtrace] {label}: {w}x{h} format={tex.format}");
+            LogElevationTrace($"{label}.grayscale", g, 0f, 1f);
+            float[] e = new float[g.Length];
+            for (int i = 0; i < g.Length; i++) e[i] = Mathf.Lerp(minElev, maxElev, g[i]);
+            LogElevationTrace($"{label}.elevation", e, minElev, maxElev);
+        }
+
+        private static void LogElevationTrace(string label, float[] values, float minElev, float maxElev)
+        {
+            int n = values.Length;
+            float sum = 0f, min = float.MaxValue, max = float.MinValue;
+            for (int i = 0; i < n; i++)
+            {
+                float v = values[i];
+                sum += v;
+                if (v < min) min = v;
+                if (v > max) max = v;
+            }
+            float mean = sum / n;
+            float ssum = 0f;
+            for (int i = 0; i < n; i++) { float d = values[i] - mean; ssum += d * d; }
+            float std = Mathf.Sqrt(ssum / n);
+
+            float[] sorted = (float[])values.Clone();
+            Array.Sort(sorted);
+            Debug.Log(
+                $"[elevtrace] {label}: n={n} min={min:F3} max={max:F3} range={max - min:F3} " +
+                $"mean={mean:F3} std={std:F3} " +
+                $"p1={sorted[Mathf.Max(0, (int)(n * 0.01f))]:F3} " +
+                $"p5={sorted[Mathf.Max(0, (int)(n * 0.05f))]:F3} " +
+                $"p50={sorted[(int)(n * 0.50f)]:F3} " +
+                $"p95={sorted[Mathf.Min(n - 1, (int)(n * 0.95f))]:F3} " +
+                $"p99={sorted[Mathf.Min(n - 1, (int)(n * 0.99f))]:F3} " +
+                $"elevMin={minElev:F3} elevMax={maxElev:F3} elevRange={maxElev - minElev:F3}");
         }
 
         /// <summary>
@@ -231,7 +313,8 @@ namespace DepthWizard.Terrain
 
         /// <summary>
         /// Raycast from a world position downward; returns the terrain height
-        /// at that point, or -1 if no hit.
+        /// at that point (true-scale, exaggeration divided back out), or -1 if
+        /// no hit.
         /// </summary>
         public float QueryHeight(Vector3 worldPos)
         {
@@ -240,13 +323,15 @@ namespace DepthWizard.Terrain
             RaycastHit hit;
             Vector3 origin = new Vector3(worldPos.x, 10000f, worldPos.z);
             if (Physics.Raycast(origin, Vector3.down, out hit, 20000f))
-                return hit.point.y;
+                return hit.point.y / _TrueScaleFactor();
             return -1f;
         }
 
         /// <summary>
-        /// Compute slope (degrees from vertical) at a given world position
-        /// by querying the mesh normal via raycast.
+        /// Compute slope (degrees from vertical) at a given world position.
+        /// The mesh is vertically exaggerated by verticalExaggeration, which
+        /// scales tan(slope) by that factor; invert it so the result is the
+        /// true slope of the unexaggerated terrain.
         /// </summary>
         public float QuerySlope(Vector3 worldPos)
         {
@@ -256,10 +341,21 @@ namespace DepthWizard.Terrain
             Vector3 origin = new Vector3(worldPos.x, 10000f, worldPos.z);
             if (Physics.Raycast(origin, Vector3.down, out hit, 20000f))
             {
-                float angle = Vector3.Angle(hit.normal, Vector3.up);
-                return angle;
+                float ex = Vector3.Angle(hit.normal, Vector3.up) * Mathf.Deg2Rad;
+                float k = _TrueScaleFactor();
+                float trueRad = Mathf.Atan(Mathf.Tan(ex) / k);
+                return trueRad * Mathf.Rad2Deg;
             }
             return 0f;
+        }
+
+        /// <summary>
+        /// Effective scale divisor: exaggeration clamped so it can never be 0
+        /// or negative (which would flip/zero heights).
+        /// </summary>
+        private float _TrueScaleFactor()
+        {
+            return Mathf.Abs(verticalExaggeration) < 0.001f ? 1f : verticalExaggeration;
         }
     }
 }

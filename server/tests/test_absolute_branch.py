@@ -97,6 +97,38 @@ def test_validation_endpoint(geo_environment, monkeypatch):
     assert evs[0]["rmse"] == data["rmse"]
 
 
+def test_validation_save_artifacts(geo_environment, monkeypatch):
+    """/validate?save_artifacts=true exports the final persisted absolute DSM
+    (never re-infers) without changing the reported metrics."""
+    upload, true_elev = geo_environment
+    monkeypatch.setattr(depth, "infer_relative_dsm", _fake_rdsm)
+    job = db.create_job(upload["id"], "absolute_dsm")
+    jobs._run_job(job["id"])
+    assert db.get_job(job["id"])["status"] == "done"
+
+    plain = jobs.run_validation(job["id"])
+    data = jobs.run_validation(job["id"], save_artifacts=True)
+
+    for k in ("rmse", "mae", "correlation", "held_out_pixel_count"):
+        assert data[k] == plain[k]
+
+    res = db.get_result_by_job(job["id"])
+    created = [p for p in config.OUTPUT_DIR.rglob("predicted_depth.npy")]
+    assert created, "no artifact directory was written"
+    dir_ = created[0].parent
+    # /validate only has the persisted absolute DSM: final-only export, no
+    # raw/relative stages, no re-inference.
+    for f in ("predicted_depth.npy", "predicted_depth.png",
+              "predicted_depth.tif", "calibrated_prediction.npy",
+              "metrics.json"):
+        assert (dir_ / f).is_file(), f
+    assert not (dir_ / "raw_prediction.npy").exists()
+    assert not (dir_ / "relative_prediction.npy").exists()
+
+    held_path = Path(res["heightmap_path"]).parent / "held_out.npz"
+    assert held_path.is_file()  # untouched by artifact export
+
+
 def test_validation_scores_held_out_not_all_pixels(geo_environment, monkeypatch):
     """/validate must have the same leak-proof guarantee as /evaluate: the
     reported numbers come from the persisted held-out 20% (never the 80% the

@@ -31,10 +31,7 @@ from typing import Optional
 import numpy as np
 
 from . import calibration as calib
-from .validate import compute_metrics
-
-# Correlation is badly defined below 2 points / when either side has no variance.
-_MIN_CORR_SAMPLES = 2
+from .validate import compute_metrics, correlation_and_reason
 
 # Comparison-image layout (used by render_height_comparison and its tests).
 _PANEL_GAP = 4
@@ -68,10 +65,13 @@ def align_dem_to_prediction(predicted: np.ndarray, dem: np.ndarray, *,
                             dem_transform=None, dem_crs=None) -> np.ndarray:
     """Return the DEM resampled onto the prediction grid.
 
-    Equal dimensions: compared directly (documented pixel-aligned pair).
-    Different dimensions: raster-aware bilinear resample, but ONLY when both
-    inputs carry enough spatial metadata (transform + CRS) to know what the
-    grids mean. Without georeferencing we refuse to guess spatial correspondence.
+    Equal dimensions: compared directly (documented pixel-aligned pair) - the
+    evaluation then assumes pixel-for-pixel correspondence with NO sub-pixel
+    shift correction: without CRS there is no ground truth to align against,
+    and any blind shift would be guessing. Different dimensions: raster-aware
+    bilinear resample, but ONLY when both input carry enough spatial metadata
+    (transform + CRS) to know what the grids mean. Without georeferencing we
+    refuse to guess spatial correspondence.
     """
     predicted = np.asarray(predicted)
     dem = np.asarray(dem)
@@ -106,13 +106,6 @@ def align_dem_to_prediction(predicted: np.ndarray, dem: np.ndarray, *,
         dst_nodata=np.nan,
     )
     return dst
-
-
-def _correlation(pred: np.ndarray, truth: np.ndarray) -> Optional[float]:
-    """Pearson correlation, or None when it is undefined (no variance / <2 px)."""
-    if pred.size < _MIN_CORR_SAMPLES or np.std(pred) == 0.0 or np.std(truth) == 0.0:
-        return None
-    return float(np.corrcoef(pred, truth)[0, 1])
 
 
 def evaluate_prediction_truth(relative_depth: np.ndarray, dem: np.ndarray, *,
@@ -155,34 +148,49 @@ def evaluate_prediction_truth(relative_depth: np.ndarray, dem: np.ndarray, *,
         "held_out_pixel_count": 0,
         "predicted_elevation": None,
         "ground_truth": None,
+        "degenerate_calibration": False,
+        "calibration_reason": None,
+        # New (additive) correlation + calibration health fields, present on
+        # EVERY branch so the response shape never varies with the outcome.
+        "correlation_reason": None,
+        "calibration_status": None,
+        "calibration_warning": None,
+        "calibration_scale": None,
+        "calibration_offset": None,
     }
 
     # No variance on either side => neither an affine calibration nor a
     # correlation is meaningfully defined.
     if np.std(pred_v) == 0.0 or np.std(truth_v) == 0.0:
+        corr, corr_reason = correlation_and_reason(pred_v, truth_v)
         return {
             **base,
             "mae": None, "rmse": None,
-            "correlation": None,
+            "correlation": corr,
+            "correlation_reason": corr_reason,
             "evaluated_units": "calibrated absolute elevation",
             "reason": "no variance in prediction and/or ground truth: calibration and "
                       "correlation are undefined",
         }
 
     if mode != "calibrated":
+        corr, corr_reason = correlation_and_reason(pred_v, truth_v)
         return {
             **base,
             "mae": None, "rmse": None,
-            "correlation": _correlation(pred_v, truth_v),
+            "correlation": corr,
+            "correlation_reason": corr_reason,
             "evaluated_units": "relative depth (uncalibrated)",
             "reason": "relative depth, uncalibrated",
         }
 
     if n_valid < 16:
+        corr, corr_reason = correlation_and_reason(pred_v, truth_v)
         return {
             **base,
             "mae": None, "rmse": None,
-            "correlation": _correlation(pred_v, truth_v),
+            "correlation": corr,
+            "correlation_reason": corr_reason,
             "evaluated_units": "relative depth (uncalibrated)",
             "reason": "fewer than 16 valid pixels: not enough to fit the scale/offset "
                       "calibration; reporting raw relative-depth correlation only",
@@ -195,20 +203,31 @@ def evaluate_prediction_truth(relative_depth: np.ndarray, dem: np.ndarray, *,
     fit = calib.fit_affine(pred_masked, truth_masked)
 
     if fit.degenerate:
+        corr, corr_reason = correlation_and_reason(pred_v, truth_v)
         return {
             **base,
             "mae": None, "rmse": None,
-            "correlation": _correlation(pred_v, truth_v),
+            "correlation": corr,
+            "correlation_reason": corr_reason,
             "evaluated_units": "calibrated absolute elevation",
             "reason": "calibration degenerate: the fitted (80%) surface had no variance "
                       "(e.g. flat prediction), so no scale/offset is meaningful; "
                       "reporting raw relative-depth correlation only",
+            # New (additive) machine-readable flag + human reason for the flag.
+            "degenerate_calibration": True,
+            "calibration_reason": calib.degenerate_reason(fit),
+            "calibration_status": fit.calibration_status,
+            "calibration_warning": fit.calibration_warning,
+            "calibration_scale": fit.scale,
+            "calibration_offset": fit.offset,
         }
 
     # Score ONLY the held-out 20% - the calibration was fit on the other 80%.
     held_pred = fit.scale * fit.held_relative + fit.offset
     held_truth = fit.held_reference
+
     metrics = compute_metrics(held_pred, held_truth)
+    corr, corr_reason = correlation_and_reason(held_pred, held_truth)
 
     # Calibrated elevation over the whole grid (NaN outside the valid mask),
     # exposed so the route can render a visualization the caller opted into.
@@ -218,7 +237,8 @@ def evaluate_prediction_truth(relative_depth: np.ndarray, dem: np.ndarray, *,
     return {
         "mae": metrics["mae"],
         "rmse": metrics["rmse"],
-        "correlation": _correlation(held_pred, held_truth),
+        "correlation": corr,
+        "correlation_reason": corr_reason,
         "valid_pixels": n_valid,
         "total_pixels": total_pixels,
         "held_out_pixel_count": int(fit.held_relative.size),
@@ -226,6 +246,12 @@ def evaluate_prediction_truth(relative_depth: np.ndarray, dem: np.ndarray, *,
         "evaluated_units": "calibrated absolute elevation (scale/offset fit on 80% of "
                            "valid pixels, scored on the held-out 20%)",
         "reason": None,
+        "degenerate_calibration": False,
+        "calibration_reason": None,
+        "calibration_status": fit.calibration_status,
+        "calibration_warning": fit.calibration_warning,
+        "calibration_scale": fit.scale,
+        "calibration_offset": fit.offset,
         "predicted_elevation": predicted_elevation,
         "ground_truth": ground_truth,
     }

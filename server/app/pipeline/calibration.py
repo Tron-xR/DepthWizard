@@ -4,6 +4,14 @@ elevation using a reference DEM (SRTM/Copernicus) or user GCPs.
 Method (per 03/05/09 docs): fit r = a * d + b (affine) via ordinary least
 squares, then robustified with RANSAC to reject outliers (water, clouds,
 buildings, vegetation) before refitting on the inlier set.
+
+Negative-scale policy: all four depth backends (pix2pix GAN, IMELE, finetuned
+decoder, Depth-Anything) normalize output so brighter = higher elevation, so a
+POSITIVE scale is the project's expected correlation direction between predicted
+relative depth and true elevation. A negative fitted scale contradicts that
+convention (it almost always means RANSAC locked onto a near-orthogonal /
+near-constant prediction). It is FLAGGED as a warning and NEVER flipped: abs()
+would fabricate a positive association the model does not have.
 """
 from __future__ import annotations
 
@@ -14,12 +22,28 @@ from typing import Optional
 import numpy as np
 from sklearn.linear_model import RANSACRegressor, LinearRegression
 
+from .. import config
+
 # Reproducible 80/20 train / held-out split applied in fit_affine: the held-out
 # 20% is used purely for validation (RMSE/MAE/correlation) and is NEVER seen by
 # the RANSAC+OLS fit. Fixed seed so every run and later /validate calls hold out
 # the same pixels.
 _TRAIN_FRACTION = 0.8
 _SPLIT_SEED = 42
+
+# Near-degenerate guard: a fit whose predicted elevation spans less than this
+# fraction of the training terrain's own elevation range (np.ptp(h_train)) is
+# effectively flat, so |scale| is meaningless. Relative, not absolute, so a
+# genuinely low-relief scene (e.g. a lake that really is 0-5 m) scales its
+# guard down with it instead of being flagged for being small.
+_LOW_RELIEF_FRACTION = 0.02
+
+# Warning kinds attached to an otherwise-valid calibration fit. They are
+# informational (never null metrics or gate completion).
+_WARN_NEGATIVE_SCALE = "negative_scale"
+_WARN_NEAR_CONSTANT = "prediction_near_constant"
+_WARN_NEAR_ZERO_SCALE = "near_zero_scale"
+_WARN_INSUFFICIENT_VARIANCE = "insufficient_variance"
 
 
 @dataclass
@@ -37,6 +61,14 @@ class CalibrationFit:
     # True when the training 80% is degenerate (constant or near-constant), so
     # no meaningful scale/offset exists; scale=0/offset=median is returned.
     degenerate: bool = False
+    # Calibration health (additive, informational): a numerically VALID fit can
+    # still be semantically suspicious - near-constant prediction, near-zero
+    # scale, or a NEGATIVE scale (see _WARN_*). Status is "valid" | "warning" |
+    # "degenerate"; warnings never null the metrics and never alter scale/offset.
+    calibration_status: str = "valid"
+    calibration_warning: Optional[str] = None
+    pred_std: Optional[float] = None   # std of prediction used for the fit
+    ref_std: Optional[float] = None    # std of reference used for the fit
 
 
 def fit_affine(relative_d: np.ndarray, reference_h: np.ndarray) -> CalibrationFit:
@@ -57,6 +89,9 @@ def fit_affine(relative_d: np.ndarray, reference_h: np.ndarray) -> CalibrationFi
     if d.size < 16:
         raise ValueError("Not enough valid sample pairs for calibration")
 
+    sp = float(np.std(d))
+    sr = float(np.std(h))
+
     rng = np.random.default_rng(_SPLIT_SEED)
     order = rng.permutation(d.size)
     n_train = int(round(d.size * _TRAIN_FRACTION))
@@ -76,6 +111,9 @@ def fit_affine(relative_d: np.ndarray, reference_h: np.ndarray) -> CalibrationFi
             rmse=float(np.sqrt(np.mean((h_train - offset) ** 2))),
             method="degenerate_constant", degenerate=True,
             held_relative=d[held], held_reference=h[held],
+            calibration_status="degenerate",
+            calibration_warning=_WARN_NEAR_CONSTANT,
+            pred_std=sp, ref_std=sr,
         )
 
     # RANSAC to find inliers on the training data
@@ -97,6 +135,9 @@ def fit_affine(relative_d: np.ndarray, reference_h: np.ndarray) -> CalibrationFi
             rmse=float(np.sqrt(np.mean((h_train - offset) ** 2))),
             method="degenerate_constant", degenerate=True,
             held_relative=d[held], held_reference=h[held],
+            calibration_status="degenerate",
+            calibration_warning=_WARN_INSUFFICIENT_VARIANCE,
+            pred_std=sp, ref_std=sr,
         )
     inlier_mask = ransac.inlier_mask_
 
@@ -108,6 +149,44 @@ def fit_affine(relative_d: np.ndarray, reference_h: np.ndarray) -> CalibrationFi
     pred = scale * d_train + offset
     rmse = float(np.sqrt(np.mean((pred - h_train) ** 2)))
 
+    # Near-degenerate guard: the fitted scale maps the full relative-depth range
+    # to a span smaller than _LOW_RELIEF_FRACTION * the training terrain's own
+    # elevation range, so the calibrated surface is effectively flat. Typical on
+    # low-relief tiles (lakes, plains) where RANSAC locks onto the flat majority
+    # and |scale| collapses to ~0 even when np.ptp(d_train) != 0. Flag it and
+    # return a constant elevation (flat result) instead of a bogus near-zero
+    # scale that exports an all-black heightmap. The job still completes.
+    relief = float(np.ptp(h_train))
+    pred_span = abs(scale) * float(np.ptp(d_train))
+    if relief > 0.0 and pred_span < _LOW_RELIEF_FRACTION * relief:
+        offset = float(np.median(h_train))
+        return CalibrationFit(
+            scale=0.0, offset=offset,
+            n_samples=int(d.size), n_inliers=n_inliers,
+            rmse=float(np.sqrt(np.mean((h_train - offset) ** 2))),
+            method="degenerate_low_relief", degenerate=True,
+            held_relative=d[held], held_reference=h[held],
+            calibration_status="degenerate",
+            calibration_warning=_WARN_NEAR_ZERO_SCALE,
+            pred_std=sp, ref_std=sr,
+        )
+
+    # Classify fit health (informational). The fit is numerically VALID and
+    # returned with its exact sign/magnitude intact - only a warning is set:
+    #   negative_scale        -> priority 0: contradicts the brighter=higher
+    #                             convention; never abs()'d (would fake a positive
+    #                             association the model does not have).
+    #   prediction_near_constant -> prediction variance is below
+    #                             config.MIN_RELATIVE_STD of the reference's
+    #                             own variance (model output effectively flat).
+    rel_std = sp / sr if sr > 0.0 else float("inf")
+    warning = None
+    if scale < 0.0:
+        warning = _WARN_NEGATIVE_SCALE
+    elif rel_std < config.MIN_RELATIVE_STD:
+        warning = _WARN_NEAR_CONSTANT
+    status = "warning" if warning else "valid"
+
     return CalibrationFit(
         scale=scale,
         offset=offset,
@@ -117,12 +196,28 @@ def fit_affine(relative_d: np.ndarray, reference_h: np.ndarray) -> CalibrationFi
         method="ransac_affine",
         held_relative=d[held],
         held_reference=h[held],
+        calibration_status=status,
+        calibration_warning=warning,
+        pred_std=sp,
+        ref_std=sr,
     )
 
 
 def apply_fit(relative_d: np.ndarray, fit: CalibrationFit) -> np.ndarray:
     """Apply an affine fit to a relative DSM to produce metric elevation."""
     return (relative_d.astype("float32") * fit.scale + fit.offset).astype("float32")
+
+
+def degenerate_reason(fit: CalibrationFit) -> Optional[str]:
+    """Human-readable reason for a flagged (degenerate) calibration fit, or
+    None when the fit is normal. Consumed by the response schemas."""
+    if not fit.degenerate:
+        return None
+    if fit.method == "degenerate_low_relief":
+        return ("low relief detected in this tile; calibration scale near zero, "
+                "elevation treated as flat")
+    return ("no variance in the predicted (fitted) surface; calibration scale "
+            "is zero, elevation treated as flat")
 
 
 def save_fit(fit: CalibrationFit, path: Path) -> None:
@@ -144,6 +239,8 @@ def save_fit(fit: CalibrationFit, path: Path) -> None:
         rmse=np.float64(fit.rmse),
         method=np.asarray(fit.method),
         degenerate=np.int8(fit.degenerate),
+        calibration_status=np.asarray(fit.calibration_status),
+        calibration_warning=np.asarray(fit.calibration_warning or ""),
         held_relative=held_r,
         held_reference=held_h,
     )
@@ -162,6 +259,12 @@ def load_fit(path: Path) -> Optional[CalibrationFit]:
             held_r = held_reference = None
         else:
             held_reference = z["held_reference"]
+        # Health fields are additive; older .npz files load as a plain valid fit.
+        cal_status = (str(z["calibration_status"].item())
+                      if "calibration_status" in z.files else "valid")
+        cal_warn_raw = z["calibration_warning"] if "calibration_warning" in z.files else np.asarray("")
+        cal_warn_raw = cal_warn_raw.item() if cal_warn_raw.size else ""
+        cal_warn = str(cal_warn_raw) if cal_warn_raw else None
         return CalibrationFit(
             scale=float(z["scale"]),
             offset=float(z["offset"]),
@@ -172,6 +275,8 @@ def load_fit(path: Path) -> Optional[CalibrationFit]:
             degenerate=bool(int(z["degenerate"])),
             held_relative=held_r,
             held_reference=held_reference,
+            calibration_status=cal_status,
+            calibration_warning=cal_warn,
         )
 
 

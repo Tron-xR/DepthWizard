@@ -54,6 +54,10 @@ namespace DepthWizard.Core
         public float mae;
         public float correlation;
         public string diff_heatmap_url;
+        // Additive calibration degeneracy flag from the server: true for flat /
+        // near-degenerate tiles. The job itself still completed normally.
+        public bool degenerate_calibration;
+        public string calibration_reason;
     }
 
     [Serializable]

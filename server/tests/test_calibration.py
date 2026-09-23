@@ -67,6 +67,44 @@ def test_fit_affine_holds_out_20_percent():
     assert np.abs(resid).max() < 1e-6
 
 
+def test_fit_affine_flags_chilika_like_low_relief_as_degenerate():
+    """Chilika Lake (real tile, Odisha): the relative depth has real variance
+    (so the legacy np.ptp(d_train)==0 check never fires), but the true terrain
+    is 93-94% a flat 0-5 m lake floor with only a thin ~11% hill strip rising
+    to ~950 m. RANSAC locks onto the flat majority and collapses to scale ~0,
+    which previously exported an all-black heightmap and called it a texture.
+    The relative low-relief guard must flag it degenerate WITHOUT rejecting the
+    job: fit completes with a flat elevation, caller keeps running."""
+    rng = np.random.default_rng(0)
+
+    # Chilika-like ground truth: 93% lake floor 0-5 m, thin west hill strip
+    # (~0.11 of the width, reaching ~950 m - the tile's real max).
+    h, w = 400, 600
+    truth = rng.uniform(0.0, 5.0, (h, w))
+    strip = max(1, int(w * 0.11))
+    ramp = np.linspace(0.0, 945.0, strip)[None, :]
+    truth[:, :strip] = np.maximum(truth[:, :strip], np.broadcast_to(ramp, (h, strip)))
+
+    # GAN-like relative depth: real variance, mean ~0.2 / std ~0.14 (matches the
+    # Chilika /evaluate reproduction metrics), so this is NOT the legacy
+    # constant-prediction degenerate case - it exercises the new low-relief guard.
+    rdsm = np.clip(rng.normal(0.20, 0.14, (h, w)), 0.0, 1.0)
+
+    fit = calib.fit_affine(rdsm, truth)
+    assert fit.degenerate is True
+    assert fit.method == "degenerate_low_relief"
+    assert fit.scale == 0.0
+    assert calib.degenerate_reason(fit) is not None
+
+    # The job does NOT fail: apply_fit still runs and yields a flat surface
+    # (the lake is genuinely flat), never a 500 or a silent garbage heightmap.
+    out = calib.apply_fit(rdsm, fit)
+    assert out.shape == rdsm.shape
+    assert float(np.ptp(out)) == 0.0
+    # the flat result sits on the lake floor (~0-5 m), not on a hill band
+    assert 0.0 < fit.offset < 5.0
+
+
 def test_resample_to_grid_shapes():
     src = np.arange(16, dtype="float32").reshape(4, 4)
     out = calib.resample_to_grid(src, (8, 8))

@@ -113,6 +113,37 @@ def test_degenerate_calibration_falls_back_to_relative():
     assert res["correlation"] > 0.99  # shape signal survives the fallback
 
 
+def test_low_relief_scene_sets_degenerate_flag():
+    """Chilika-like low-relief tile (mostly a flat 0-5 m lake with a thin ~950 m
+    hill strip): the relative depth has real variance, so scale calibration
+    collapses near zero and must be FLAGGED (degenerate_calibration=True with a
+    human reason) while the evaluation still completes (no 500)."""
+    rng = np.random.default_rng(2)
+    h, w = 200, 300
+    dem = rng.uniform(0.0, 5.0, (h, w))
+    strip = max(1, int(w * 0.11))
+    ramp = np.linspace(0.0, 945.0, strip)[None, :]
+    dem[:, :strip] = np.maximum(dem[:, :strip], np.broadcast_to(ramp, (h, strip)))
+    rdsm = np.clip(rng.normal(0.20, 0.14, (h, w)), 0.0, 1.0)
+
+    res = _grid(dem, rdsm)
+    assert res["degenerate_calibration"] is True
+    assert res["calibration_reason"] and "low relief" in res["calibration_reason"]
+    assert res["mae"] is None and res["rmse"] is None
+    assert res["calibrated"] is False
+    assert res["correlation"] is not None
+
+
+def test_healthy_scene_clear_degenerate_flag():
+    """A well-conditioned scene must NOT trip the low-relief guard."""
+    rdsm = np.linspace(0, 1, 64 * 64).reshape(64, 64)
+    dem = 120.0 * rdsm + 30.0
+    res = _grid(dem, rdsm)
+    assert res["degenerate_calibration"] is False
+    assert res["calibration_reason"] is None
+    assert res["calibrated"] is True
+
+
 # --------------------------------------------------------------------------- #
 # F. Different dimensions: refuse without spatial metadata, pass through when
 #    equal.

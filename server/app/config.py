@@ -22,6 +22,13 @@ PORT: int = int(os.environ.get("DEPTHWIZARD_PORT", "8000"))
 MAX_WORKING_DIM: int = int(os.environ.get("DEPTHWIZARD_MAX_DIM", "1024"))
 # Vertical relief (m) applied to the normalized relative DSM so Unity meshes are legible.
 RELATIVE_ELEVATION_RANGE_M: float = float(os.environ.get("DEPTHWIZARD_RELIEF_M", "200"))
+# Calibration-health threshold: a prediction whose std is below this FRACTION of
+# the reference DEM's own std is treated as effectively constant (warned as
+# "prediction_near_constant") even when the affine fit is numerically valid.
+# Relative, not absolute, so a genuinely near-flat scene is not over-flagged.
+MIN_RELATIVE_STD: float = max(
+    float(os.environ.get("DEPTHWIZARD_MIN_RELATIVE_STD", "0.05")), 1e-9
+)
 # Depth backbone. The pix2pix GAN SavedModel is the default backend when present
 # (models/pix2pix in the repo root); set DEPTHWIZARD_TF_MODEL to a different
 # SavedModel, or set it to an empty string to force the transformers/HF
@@ -41,6 +48,12 @@ IMELE_MODEL_PATH: str = os.environ.get("DEPTHWIZARD_IMELE_MODEL", "")
 # Fourth backend: fine-tuned DA2-small + trained decoder head checkpoint
 # (produced by decoder_training/train_decoder.py). Opt-in only.
 FINETUNED_MODEL_PATH: str = os.environ.get("DEPTHWIZARD_FINETUNED_MODEL", "")
+
+# Optional prediction-artifact export root. Artifacts are written ONLY when a
+# request opts in (e.g. /evaluate?save_artifacts=true), under
+# <OUTPUT_DIR>/<backend>/<input-stem>/ so pix2pix vs IMELE runs never collide.
+# Overridable via DEPTHWIZARD_OUTPUT_DIR; defaults to server/outputs.
+OUTPUT_DIR: Path = Path(os.environ.get("DEPTHWIZARD_OUTPUT_DIR", SERVER_ROOT / "outputs"))
 
 # Reference DEM fetch
 DEM_FETCH_TIMEOUT_S: float = float(os.environ.get("DEPTHWIZARD_DEM_TIMEOUT", "30"))
