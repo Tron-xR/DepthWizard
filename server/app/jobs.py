@@ -262,6 +262,7 @@ def run_validation(job_id: str, *, save_artifacts: bool = False) -> dict:
             backend=depth.backend_slug(),
             model_identifier=depth.model_identifier(),
             input_filename=upload["original_filename"] or f"{job_id}.tif",
+            job_id=job_id,
             calibrated=pred,
             ground_truth=ref,
             metrics=artifact_metrics,

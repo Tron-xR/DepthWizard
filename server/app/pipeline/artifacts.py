@@ -104,7 +104,12 @@ def export_prediction_artifacts(
     output directory containing the artifacts.
     """
     stem = Path(input_filename).stem
-    out_dir = out_root / backend / stem
+    if job_id:
+        # Job-scoped primary key: every upload (even same-named A/B) gets its
+        # own directory, so artifact exports can never leak across terrains.
+        out_dir = out_root / backend / job_id
+    else:
+        out_dir = out_root / backend / stem
     out_dir.mkdir(parents=True, exist_ok=True)
 
     final = calibrated if calibrated is not None else relative

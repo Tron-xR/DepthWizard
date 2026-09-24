@@ -220,3 +220,29 @@ def test_non_georeferenced_input_writes_plain_tif(tmp_path):
     with rasterio.open(tmp_path / "pix2pix" / "scene" / "predicted_depth.tif") as dst:
         assert dst.crs is None
         assert dst.height == calibrated.shape[0]
+
+
+def test_same_filename_two_jobs_never_share_artifact_dir(tmp_path):
+    # Terrain A then Terrain B, both uploaded as "scene.png" in one session.
+    # Job-scoped export must keep them in separate directories so B can never
+    # serve A's already-written artifacts, even though the stem is identical.
+    rel_a, cal_a, _ = _synth_prediction(seed=11)
+    rel_b, cal_b, _ = _synth_prediction(seed=22)
+    artifacts.export_prediction_artifacts(
+        out_root=tmp_path, backend="pix2pix", model_identifier="m",
+        input_filename="scene.png", job_id="job-A",
+        relative=rel_a, calibrated=cal_a, raw=None,
+        metrics={}, crs=None, transform=None, bounds=None)
+    artifacts.export_prediction_artifacts(
+        out_root=tmp_path, backend="pix2pix", model_identifier="m",
+        input_filename="scene.png", job_id="job-B",
+        relative=rel_b, calibrated=cal_b, raw=None,
+        metrics={}, crs=None, transform=None, bounds=None)
+    dir_a = tmp_path / "pix2pix" / "job-A"
+    dir_b = tmp_path / "pix2pix" / "job-B"
+    assert dir_a != dir_b
+    # stem fallback dir is NOT created when job_id is threaded through
+    assert not (tmp_path / "pix2pix" / "scene").exists()
+    # each job's dir holds its own prediction, not the sibling's
+    assert np.array_equal(np.load(dir_a / "predicted_depth.npy"), cal_a)
+    assert np.array_equal(np.load(dir_b / "predicted_depth.npy"), cal_b)
