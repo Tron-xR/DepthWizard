@@ -2,6 +2,17 @@
 
 Image-to-3D-terrain pipeline: upload a satellite/aerial photo, get back a real-world-scaled 3D mesh with elevation calibrated against DEM ground truth.
 
+## Demo
+
+| Sample | What it shows |
+|---|---|
+| [`georeferenced.mp4`](Samples/georeferenced.mp4) | Rotating 3D model in the viewer |
+| [`georeferenced.png`](Samples/georeferenced.png) | Georeferenced 3D model |
+| [`non georeferenced.png`](Samples/non%20georeferenced.png) | Same scene without georeferencing |
+
+![Georeferenced 3D model](Samples/georeferenced.png)
+![Non-georeferenced 3D model](Samples/non%20georeferenced.png)
+
 ## Prerequisites
 
 | Tool | Version | Why |
