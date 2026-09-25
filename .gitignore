@@ -59,6 +59,7 @@ desktop.ini
 # Old design docs & config (replaced by README.md)
 *.md
 !README.md
+!docs/PROJECT_DOCUMENTATION.md
 opencode.json
 AGENTS.md
 server/DEPLOYMENT.md

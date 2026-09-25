@@ -424,6 +424,16 @@ Design and experiment notes: [`14-evaluation-results.md`](14-evaluation-results.
 
 ---
 
+## Documentation
+
+For complete technical documentation covering the architecture, AI pipeline,
+DEM processing, calibration, evaluation, API, Unity client, configuration,
+installation, testing, troubleshooting, and development history, see:
+
+[DepthWizard Technical Documentation](docs/PROJECT_DOCUMENTATION.md)
+
+---
+
 ## Contributing
 
 Small, focused changes are welcome. Please:
