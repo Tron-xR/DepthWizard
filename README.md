@@ -426,8 +426,12 @@ Small, focused changes are welcome. Please:
 
 ## License
 
-No license file is included; the project is not currently published under an open-source
-license. Contact the maintainers on the repository if you need to use or redistribute it.
+DepthWizard is licensed under the MIT License. See the [LICENSE](LICENSE)
+file for the complete license text.
+
+Third-party libraries, pretrained models, model weights, datasets, and other
+external assets remain subject to their respective licenses. The MIT License
+for DepthWizard does not override or relicense those external components.
 
 ---
 
