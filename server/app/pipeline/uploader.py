@@ -12,6 +12,8 @@ from typing import Optional
 
 from PIL import Image
 
+import numpy as np
+
 from .. import config
 from ..errors import DepthWizardError
 
@@ -109,7 +111,7 @@ def _downsample_array(arr, max_dim: int) -> tuple:
     return out, scale
 
 
-def _preview_rgb(arr) -> np.ndarray:
+def _preview_rgb(arr) -> "np.ndarray":
     """float[bands,H,W] -> uint8[H,W,3] for a cosmetic thumbnail."""
     import numpy as np
 
