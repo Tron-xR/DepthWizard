@@ -80,18 +80,18 @@ A rotating view of a reconstructed, georeferenced terrain model.
 
 ```mermaid
 flowchart TD
-    A[Input image via Unity client] --> B[Validation & upload<br/>validate.py · uploader.py]
-    B --> C[Depth backend<br/>depth.py — backend dispatch + infer_relative_dsm]
-    C --> D[Relative depth / elevation map]
-    D --> E{Georeferenced input?}
-    E -->|Yes| F[Reference DEM<br/>dem_source.py — OpenTopography / Copernicus]
-    F --> G[Elevation calibration<br/>calibration.py — RANSAC + least-squares, 80/20 holdout]
-    G --> H[Calibrated DSM]
-    E -->|No| I[Relative terrain<br/>relief scaled for legibility]
-    H --> J[Export<br/>exporter.py — GeoTIFF / PNG / NPZ]
+    A["Input image via Unity client"] --> B["Validation & upload — validate.py · uploader.py"]
+    B --> C["Depth backend — depth.py · backend dispatch + infer_relative_dsm"]
+    C --> D["Relative depth / elevation map"]
+    D --> E{"Georeferenced input?"}
+    E -->|Yes| F["Reference DEM — dem_source.py · OpenTopography / Copernicus"]
+    F --> G["Elevation calibration — calibration.py · RANSAC + least-squares, 80/20 holdout"]
+    G --> H["Calibrated DSM"]
+    E -->|No| I["Relative terrain — relief scaled for legibility"]
+    H --> J["Export — exporter.py · GeoTIFF / PNG / NPZ"]
     I --> J
-    J --> K[Unity terrain mesh<br/>MeshGenerator.cs]
-    K --> L[3D viewer<br/>ViewerScreen.cs — overlay · display modes · DSM export]
+    J --> K["Unity terrain mesh — MeshGenerator.cs"]
+    K --> L["3D viewer — ViewerScreen.cs · overlay, display modes, DSM export"]
 ```
 
 Model dispatch (`depth.py`) resolves the active backend first; calibration and export are
@@ -101,11 +101,11 @@ pipeline stages that apply regardless of which backend produced the prediction.
 
 ```mermaid
 flowchart LR
-    U[Unity client<br/>upload · process · view] --HTTP--> S[FastAPI server<br/>uvicorn · 127.0.0.1:8000]
-    S --> P[Depth pipeline<br/>depth → calibration → export]
-    P --> DB[(SQLite<br/>uploads · jobs · artifacts)]
-    P --> F[Files<br/>/files/{job_id}/{filename}]
-    S --> T[Reference DEM<br/>OpenTopography / Copernicus]
+    U["Unity client — upload · process · view"] --HTTP--> S["FastAPI server — uvicorn · 127.0.0.1:8000"]
+    S --> P["Depth pipeline — depth → calibration → export"]
+    P --> DB[("SQLite — uploads · jobs · artifacts")]
+    P --> F["Files: /files/{job_id}/{filename}"]
+    S --> T["Reference DEM — OpenTopography / Copernicus"]
     F --HTTP--> U
     DB --> S
 ```
