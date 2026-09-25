@@ -58,6 +58,18 @@ A rotating view of a reconstructed, georeferenced terrain model.
 
 ---
 
+## Pipeline
+
+<p align="center">
+  <img
+    src="docs/assets/depthwizard_pipeline.png"
+    alt="DepthWizard RGB to 3D terrain pipeline"
+    width="1000"
+  >
+</p>
+
+---
+
 ## Key Capabilities
 
 | Capability | Description |
