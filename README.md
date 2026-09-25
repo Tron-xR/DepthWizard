@@ -13,6 +13,8 @@ Image-to-3D-terrain pipeline: upload a satellite/aerial photo, get back a real-w
 ![Georeferenced 3D model](Samples/georeferenced.png)
 ![Non-georeferenced 3D model](Samples/non%20georeferenced.png)
 
+<video controls width="720" src="Samples/georeferenced.mp4"></video>
+
 ## Prerequisites
 
 | Tool | Version | Why |
