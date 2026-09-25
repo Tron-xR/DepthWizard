@@ -145,6 +145,58 @@ def test_result_before_done_returns_409(client):
     assert resp.status_code in (200, 409)
 
 
+def test_dem_view_relative(client):
+    from PIL import Image
+
+    from app import db, jobs
+
+    rgb = make_rgb_gradient(96, 96)
+    buf = io.BytesIO()
+    Image.fromarray(rgb, "RGB").save(buf, "PNG")
+    up = client.post("/upload", files={"file": ("test.png", buf.getvalue(), "image/png")}).json()
+
+    # run the job synchronously (worker queue is a singleton across tests; the
+    # established deterministic pattern is jobs._run_job - see test_absolute_branch)
+    job = db.create_job(up["upload_id"], "rdsm")
+    jobs._run_job(job["id"])
+    assert db.get_job(job["id"])["status"] == "done"
+
+    resp = client.get(f"/dem-view/{job['id']}")
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"] == "image/png"
+
+    img = Image.open(io.BytesIO(resp.content)).convert("L")
+    assert img.width == 96 and img.height == 96
+    hist = img.histogram()
+    # ramp spans the job's own [0, 200] m range exactly -> full 0..255 stretch
+    assert hist[0] > 0 and hist[255] > 0
+
+
+def test_dem_view_png_uses_float_dsm(tmp_path):
+    # georeferenced archive path: renders from the full-precision float32 DSM
+    from io import BytesIO
+
+    import rasterio
+    from rasterio.transform import from_origin
+    from PIL import Image
+
+    from app.pipeline.exporter import dem_view_png
+
+    elev = np.arange(1600, dtype="float32").reshape(40, 40) + 500.0  # 500..1599
+    tif = tmp_path / "dsm.tif"
+    profile = {"driver": "GTiff", "height": 40, "width": 40, "count": 1,
+               "dtype": "float32", "crs": "EPSG:32633",
+               "transform": from_origin(500000.0, 4650000.0, 30.0, 30.0)}
+    with rasterio.open(tif, "w", **profile) as dst:
+        dst.write(elev, 1)
+
+    png = dem_view_png("missing.png", str(tif), 500.0, 1599.0)
+    img = Image.open(BytesIO(png)).convert("L")
+    assert img.width == 40 and img.height == 40
+    assert img.getpixel((0, 0)) == 0
+    assert img.getpixel((39, 39)) == 255
+
+
 def test_unknown_job_404(client):
     assert client.get("/status/nope").status_code == 404
     assert client.get("/result/nope").status_code == 404

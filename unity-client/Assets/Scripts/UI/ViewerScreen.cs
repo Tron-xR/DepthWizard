@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
@@ -18,6 +19,17 @@ namespace DepthWizard.UI
         [SerializeField] private Button _screenshotButton;
         [SerializeField] private Button _menuButton;
         [SerializeField] private TextMeshProUGUI _validationResultText;
+
+        [Header("DEM view overlay")]
+        [Tooltip("RawImage that shows the grayscale DEM overlay of the current job. " +
+                 "Leave null to skip the feature; ToggleDemView logs an error.")]
+        [SerializeField] private RawImage _demViewImage;
+        [Tooltip("Optional wrapper panel that shows/hides with the overlay. May be null.")]
+        [SerializeField] private GameObject _demViewPanel;
+
+        [Header("Display mode")]
+        [Tooltip("Rotation speed of the terrain while in display/showcase mode, degrees per second.")]
+        [SerializeField] private float _displayRotationSpeed = 15f;
 
         [Header("Terrain")]
         [SerializeField] private MeshGenerator _meshGenerator;
@@ -39,6 +51,24 @@ namespace DepthWizard.UI
 
         private Texture2D _cachedHeightTex;
         private Texture2D _cachedSourceTex;
+        private Texture2D _cachedDemTex;
+        private bool _demViewVisible;
+
+        // Display (showcase) mode state: while active, the Viewer UI is hidden
+        // and the Terrain rotates in place about its own centre on the Y axis.
+        // Rotation about world-Y leaves every vertex's world-Y unchanged and
+        // every normal's angle to Vector3.up unchanged, so the HUD raycast
+        // height/slope math stays exactly correct during and after rotation.
+        private bool _displayModeActive;
+        private int _displayEnterFrame = -1;
+        private readonly List<UiSnapshot> _displayUiSnapshot = new List<UiSnapshot>();
+
+        private struct UiSnapshot
+        {
+            public GameObject Target;
+            public bool Active;
+            public bool Interactable;
+        }
 
         // Monotonic token: every new result invalidates any in-flight download
         // from the previous result, so a slow A can never overwrite a newer B.
@@ -59,6 +89,8 @@ namespace DepthWizard.UI
             _renderToken++;
             _cachedHeightTex = null;
             _cachedSourceTex = null;
+            _cachedDemTex = null;
+            SetDemViewShown(false);
             _resultData = data;
             if (isActiveAndEnabled)
                 StartCoroutine(BuildTerrain());
@@ -99,6 +131,9 @@ namespace DepthWizard.UI
 
         private void OnDisable()
         {
+            // Leaving the viewer (e.g. to the main menu) must never leave the
+            // screen half-hidden or the Terrain rotating underneath it.
+            if (_displayModeActive) ExitDisplayMode();
             _validateButton.onClick.RemoveListener(OnValidate);
             _wireframeButton.onClick.RemoveListener(OnToggleWireframe);
             _screenshotButton.onClick.RemoveListener(OnScreenshot);
@@ -180,6 +215,17 @@ namespace DepthWizard.UI
 
         private void Update()
         {
+            if (_displayModeActive)
+            {
+                RotateDisplayModel();
+                // Skip the click that entered the mode (same frame as the
+                // button press); any later mouse/tap click anywhere exits.
+                if (Time.frameCount > _displayEnterFrame && ShouldExitDisplay())
+                {
+                    ExitDisplayMode();
+                    return;
+                }
+            }
             UpdateHUD();
         }
 
@@ -259,6 +305,141 @@ namespace DepthWizard.UI
                     _validationResultText.color = Color.white;
                     _validationResultText.text = $"Validation error: {err}";
                 }));
+        }
+
+        /// <summary>
+        /// Toggle the grayscale DEM overlay of the current job.
+        /// First call: fetch /dem-view/{job_id} (cached per job) and show it.
+        /// Second call: hide the overlay without refetching.
+        /// Assigned in the Inspector: _demViewImage (RawImage) and the optional
+        /// _demViewPanel (GameObject) it sits on.
+        /// </summary>
+        public void ToggleDemView()
+        {
+            if (_demViewImage == null)
+            {
+                Debug.LogError(
+                    "ToggleDemView: _demViewImage is not assigned. Drag a RawImage " +
+                    "onto ViewerScreen._demViewImage in the Inspector.");
+                return;
+            }
+            if (_launcher == null)
+                _launcher = Object.FindFirstObjectByType<Launcher>(FindObjectsInactive.Include);
+
+            if (_demViewVisible)
+            {
+                SetDemViewShown(false);
+                return;
+            }
+            if (_cachedDemTex != null)
+            {
+                _demViewImage.texture = _cachedDemTex;
+                SetDemViewShown(true);
+                return;
+            }
+            if (string.IsNullOrEmpty(_jobId))
+            {
+                Debug.LogError("ToggleDemView: no job loaded yet.");
+                return;
+            }
+
+            StartCoroutine(_launcher.Api.DownloadTexture($"/dem-view/{_jobId}",
+                onSuccess: tex =>
+                {
+                    _cachedDemTex = tex;
+                    _demViewImage.texture = tex;
+                    SetDemViewShown(true);
+                },
+                onError: err => Debug.LogError($"DEM view download error: {err}")));
+        }
+
+        private void SetDemViewShown(bool shown)
+        {
+            _demViewVisible = shown;
+            if (_demViewImage != null)
+                _demViewImage.gameObject.SetActive(shown);
+            if (_demViewPanel != null)
+                _demViewPanel.SetActive(shown);
+        }
+
+        /// <summary>
+        /// Toggle display/showcase mode: hides the Viewer UI and spins the
+        /// Terrain in place about its centre. Any tap/click exits and restores
+        /// every UI element to its exact prior active/interactable state.
+        /// </summary>
+        public void ToggleDisplayMode()
+        {
+            if (_displayModeActive) ExitDisplayMode();
+            else EnterDisplayMode();
+        }
+
+        private void EnterDisplayMode()
+        {
+            _displayModeActive = true;
+            _displayEnterFrame = Time.frameCount;
+            CaptureDisplayUi();
+            foreach (UiSnapshot s in _displayUiSnapshot)
+                s.Target.SetActive(false);
+            Debug.Log("Display mode ON: UI hidden, model rotating.");
+        }
+
+        private void ExitDisplayMode()
+        {
+            foreach (UiSnapshot s in _displayUiSnapshot)
+            {
+                s.Target.SetActive(s.Active);
+                Selectable sel = s.Target.GetComponent<Selectable>();
+                if (sel != null) sel.interactable = s.Interactable;
+            }
+            _displayUiSnapshot.Clear();
+            _displayModeActive = false;
+            _displayEnterFrame = -1;
+            Debug.Log("Display mode OFF: UI restored, rotation stopped.");
+        }
+
+        /// <summary>Snapshot the current visibility of every Viewer UI element so exit
+        /// can restore it exactly (including conditional ones like Validate being
+        /// grayed for non-georeferenced results). Enumerates direct children of
+        /// the Viewer canvas so hand-placed buttons/DEM overlays hide too; the
+        /// Terrain mesh (has a MeshRenderer) is never hidden.</summary>
+        private void CaptureDisplayUi()
+        {
+            _displayUiSnapshot.Clear();
+            foreach (Transform child in transform)
+            {
+                if (child.GetComponent<MeshRenderer>() != null) continue;
+                CaptureUi(child.gameObject);
+            }
+        }
+
+        private void CaptureUi(GameObject go)
+        {
+            if (go == null) return;
+            Selectable sel = go.GetComponent<Selectable>();
+            _displayUiSnapshot.Add(new UiSnapshot
+            {
+                Target = go,
+                Active = go.activeSelf,
+                Interactable = sel != null && sel.interactable,
+            });
+        }
+
+        private void RotateDisplayModel()
+        {
+            if (_meshGenerator == null) return;
+            MeshRenderer mr = _meshGenerator.MeshRenderer;
+            if (mr == null) return;
+            // Pivot at the mesh's world centre so the Terrain spins in place
+            // and stays inside the frame the camera already framed.
+            _meshGenerator.transform.RotateAround(
+                mr.bounds.center, Vector3.up, _displayRotationSpeed * Time.deltaTime);
+        }
+
+        private bool ShouldExitDisplay()
+        {
+            if (Input.GetMouseButtonDown(0)) return true;
+            if (Input.touchCount > 0 && Input.GetTouch(0).phase == TouchPhase.Began) return true;
+            return false;
         }
 
         private void OnToggleWireframe()

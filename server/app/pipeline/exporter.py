@@ -18,6 +18,37 @@ def _normalize_8bit(arr: np.ndarray) -> np.ndarray:
     return ((arr - lo) / (hi - lo) * 255).astype("uint8")
 
 
+def dem_view_png(heightmap_path: str, dsm_geotiff_path: Optional[str],
+                 min_elev: Optional[float], max_elev: Optional[float]) -> bytes:
+    """Grayscale DEM overlay PNG of the true-scale elevation grid.
+
+    Renders the same elevation array the Unity mesh consumed, min-max
+    normalized to this job's own range, never exaggerated. Uses the
+    full-precision float32 dsm.tif when a georeferenced job archived one;
+    otherwise de-normalizes the 8-bit heightmap back to meters with the stored
+    min/max (the exact array that became mesh vertices). Cosmetic only - like
+    /preview it never feeds the pipeline.
+    """
+    from io import BytesIO
+
+    from PIL import Image
+
+    if dsm_geotiff_path and Path(dsm_geotiff_path).is_file():
+        import rasterio
+
+        with rasterio.open(dsm_geotiff_path) as src:
+            elev = src.read(1).astype("float64")
+    else:
+        arr8 = np.asarray(Image.open(heightmap_path).convert("L")).astype("float64")
+        lo, hi = float(min_elev or 0.0), float(max_elev or 0.0)
+        if hi <= lo:
+            hi = lo + 1.0
+        elev = arr8 / 255.0 * (hi - lo) + lo
+    buf = BytesIO()
+    Image.fromarray(_normalize_8bit(elev), "L").save(buf, "PNG")
+    return buf.getvalue()
+
+
 def export_heightmap(elevation: np.ndarray, path: Path) -> dict:
     """Write an 8-bit grayscale heightmap PNG for the Unity mesh generator.
 

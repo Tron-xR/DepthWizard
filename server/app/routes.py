@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, Response
 
 from . import config, db, jobs
 from .errors import DepthWizardError
-from .pipeline import uploader, depth, evaluation, artifacts
+from .pipeline import uploader, depth, evaluation, artifacts, exporter
 from .schemas import (
     ErrorResponse,
     EvaluationResponse,
@@ -124,6 +124,32 @@ def _result_response(res: dict, upload: dict) -> ResultResponse:
         world_depth=res["world_depth"],
         is_georeferenced=bool(upload["is_georeferenced"]),
     )
+
+
+@router.get("/dem-view/{job_id}")
+def dem_view(job_id: str) -> Response:
+    """Grayscale DEM overlay PNG of a finished job's calibrated elevation.
+
+    Renders the same true-scale elevation array the Unity mesh consumed
+    (full-precision dsm.tif when archived, else the 8-bit heightmap
+    de-normalized to meters via the stored min/max), min-max normalized to
+    this job's own range. Never exaggerated. Purely cosmetic; like /preview it
+    feeds nothing back into the pipeline.
+    """
+    job = db.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=ErrorResponse(error="not_found", message="Job not found").model_dump())
+    if job["status"] != "done":
+        raise HTTPException(status_code=409, detail=ErrorResponse(error="not_ready", message="Job is not done").model_dump())
+    res = db.get_result_by_job(job_id)
+    if res is None:
+        raise HTTPException(status_code=404, detail=ErrorResponse(error="not_found", message="Result not found").model_dump())
+    try:
+        png = exporter.dem_view_png(res["heightmap_path"], res.get("dsm_geotiff_path"),
+                                    res.get("min_elev"), res.get("max_elev"))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=ErrorResponse(error="dem_view_failed", message=f"DEM view unavailable: {e}").model_dump())
+    return Response(content=png, media_type="image/png")
 
 
 @router.get("/validate/{job_id}", response_model=ValidationResponse)
