@@ -31,8 +31,6 @@ namespace DepthWizard.UI
         [Tooltip("Display-only vertical exaggeration, default 3x for the georeferenced branch. " +
                  "Applied only in MeshGenerator.Build; never sent to the server or used by metrics.")]
         [SerializeField] private float _exaggerationValue = 3f;
-        [SerializeField] private float _exaggerationMin = 1f;
-        [SerializeField] private float _exaggerationMax = 10f;
 
         private Launcher _launcher;
         private ResultResponse _resultData;
@@ -41,13 +39,16 @@ namespace DepthWizard.UI
 
         private Texture2D _cachedHeightTex;
         private Texture2D _cachedSourceTex;
-        private GameObject _exaggerationControl;
-        private TextMeshProUGUI _exaggerationLabel;
-        private Slider _exaggerationSlider;
 
         // Monotonic token: every new result invalidates any in-flight download
         // from the previous result, so a slow A can never overwrite a newer B.
         private int _renderToken;
+
+        // ProcessingScreen calls SetResultData before ShowViewer, so a new
+        // result arrives while this screen is still inactive. Rebuild then
+        // (instead of gating on isActiveAndEnabled) so the second upload
+        // actually renders instead of keeping the first job's mesh on screen.
+        private bool _pendingBuild;
 
         public void SetResultData(ResultResponse data)
         {
@@ -61,6 +62,8 @@ namespace DepthWizard.UI
             _resultData = data;
             if (isActiveAndEnabled)
                 StartCoroutine(BuildTerrain());
+            else
+                _pendingBuild = true;
         }
 
         public void SetJobId(string jobId) => _jobId = jobId;
@@ -85,6 +88,13 @@ namespace DepthWizard.UI
                 _validateButton.interactable = false;
                 _validationResultText.text = "Validation needs a georeferenced image (GPS/EXIF tags).";
             }
+
+            if (_pendingBuild)
+            {
+                _pendingBuild = false;
+                if (_resultData != null)
+                    StartCoroutine(BuildTerrain());
+            }
         }
 
         private void OnDisable()
@@ -93,12 +103,6 @@ namespace DepthWizard.UI
             _wireframeButton.onClick.RemoveListener(OnToggleWireframe);
             _screenshotButton.onClick.RemoveListener(OnScreenshot);
             _menuButton.onClick.RemoveListener(OnMenu);
-        }
-
-        private void Start()
-        {
-            if (_resultData != null)
-                StartCoroutine(BuildTerrain());
         }
 
         private IEnumerator BuildTerrain()
@@ -129,8 +133,8 @@ namespace DepthWizard.UI
         }
 
         /// <summary>
-        /// Effective vertical exaggeration: georeferenced/absolute branch gets
-        /// the live-adjustable exaggeration; the relative/rDSM branch already
+        /// Effective vertical exaggeration: georeferenced/absolute branch uses
+        /// the Inspector-configured value; the relative/rDSM branch already
         /// spans a fixed 0..200 m over a 1000 m world (about 20% relief) so it
         /// stays at true scale (1x).
         /// </summary>
@@ -149,8 +153,6 @@ namespace DepthWizard.UI
                 _resultData.min_elev, _resultData.max_elev,
                 _resultData.world_width, _resultData.world_depth);
             FrameTerrain();
-            EnsureExaggerationControl();
-            UpdateExaggerationDisclosure();
         }
 
         private void FrameTerrain()
@@ -174,135 +176,6 @@ namespace DepthWizard.UI
 
             FreeFlyCamera fly = _cam.GetComponent<FreeFlyCamera>();
             if (fly != null) fly.SyncState();
-        }
-
-        /// <summary>
-        /// Build the vertical-exaggeration disclosure label + slider once, under
-        /// the ViewerScreen canvas. Always lives on-screen during the demo (not
-        /// tucked into a settings submenu); hidden only when exaggeration is
-        /// inactive (relative branch stays at true scale, 1x).
-        /// </summary>
-        private void EnsureExaggerationControl()
-        {
-            if (_exaggerationControl != null) return;
-
-            _exaggerationControl = new GameObject("ExaggerationControl",
-                typeof(RectTransform), typeof(CanvasRenderer));
-            RectTransform root = _exaggerationControl.GetComponent<RectTransform>();
-            root.SetParent(transform, false);
-            root.anchorMin = new Vector2(0f, 0f);
-            root.anchorMax = new Vector2(1f, 1f);
-            root.offsetMin = Vector2.zero;
-            root.offsetMax = Vector2.zero;
-
-            TMP_FontAsset font = _heightText != null ? _heightText.font : null;
-
-            GameObject labelGo = new GameObject("ExaggerationLabel",
-                typeof(RectTransform), typeof(CanvasRenderer));
-            _exaggerationLabel = labelGo.AddComponent<TextMeshProUGUI>();
-            RectTransform labelRt = labelGo.GetComponent<RectTransform>();
-            labelRt.SetParent(root, false);
-            labelRt.anchorMin = new Vector2(0f, 0f);
-            labelRt.anchorMax = new Vector2(0f, 0f);
-            labelRt.pivot = new Vector2(0f, 0f);
-            labelRt.anchoredPosition = new Vector2(16f, 16f);
-            labelRt.sizeDelta = new Vector2(560f, 44f);
-            _exaggerationLabel.font = font;
-            _exaggerationLabel.fontSize = 22;
-            _exaggerationLabel.color = new Color(1f, 0.82f, 0.25f, 1f);
-            _exaggerationLabel.raycastTarget = false;
-
-            Sprite sprite = MakeWhiteSprite();
-
-            GameObject bgGo = new GameObject("ExaggerationBackground",
-                typeof(RectTransform), typeof(CanvasRenderer));
-            Image bg = bgGo.AddComponent<Image>();
-            bg.sprite = sprite;
-            bg.color = new Color(0f, 0f, 0f, 0.72f);
-            RectTransform bgRt = bgGo.GetComponent<RectTransform>();
-            bgRt.SetParent(root, false);
-            bgRt.anchorMin = new Vector2(0f, 0f);
-            bgRt.anchorMax = new Vector2(0f, 0f);
-            bgRt.pivot = new Vector2(0f, 0f);
-            bgRt.anchoredPosition = new Vector2(16f, 72f);
-            bgRt.sizeDelta = new Vector2(560f, 30f);
-
-            GameObject sliderGo = new GameObject("ExaggerationSlider",
-                typeof(RectTransform));
-            Slider slider = sliderGo.AddComponent<Slider>();
-            RectTransform sliderRt = sliderGo.GetComponent<RectTransform>();
-            sliderRt.SetParent(bgRt, false);
-            sliderRt.anchorMin = new Vector2(0f, 0f);
-            sliderRt.anchorMax = new Vector2(0f, 0f);
-            sliderRt.pivot = new Vector2(0f, 0f);
-            sliderRt.anchoredPosition = new Vector2(12f, 5f);
-            sliderRt.sizeDelta = new Vector2(400f, 20f);
-
-            GameObject fillGo = new GameObject("Fill",
-                typeof(RectTransform), typeof(CanvasRenderer));
-            Image fill = fillGo.AddComponent<Image>();
-            fill.sprite = sprite;
-            fill.color = new Color(1f, 0.82f, 0.25f, 1f);
-            RectTransform fillRt = fillGo.GetComponent<RectTransform>();
-            fillRt.SetParent(sliderRt, false);
-            fillRt.anchorMin = Vector2.zero;
-            fillRt.anchorMax = new Vector2(0f, 1f);
-            fillRt.pivot = new Vector2(0f, 0.5f);
-            fillRt.anchoredPosition = new Vector2(0f, 6f);
-            fillRt.sizeDelta = new Vector2(0f, 12f);
-
-            GameObject handleGo = new GameObject("Handle",
-                typeof(RectTransform), typeof(CanvasRenderer));
-            Image handle = handleGo.AddComponent<Image>();
-            handle.sprite = sprite;
-            handle.color = Color.white;
-            RectTransform handleRt = handleGo.GetComponent<RectTransform>();
-            handleRt.SetParent(sliderRt, false);
-            handleRt.anchorMin = handleRt.anchorMax = new Vector2(0f, 0.5f);
-            handleRt.pivot = new Vector2(0.5f, 0.5f);
-            handleRt.sizeDelta = new Vector2(20f, 20f);
-
-            slider.minValue = _exaggerationMin;
-            slider.maxValue = _exaggerationMax;
-            slider.fillRect = fillRt;
-            slider.handleRect = handleRt;
-            slider.targetGraphic = handle;
-            slider.SetValueWithoutNotify(_exaggerationValue);
-            slider.onValueChanged.AddListener(OnExaggerationChanged);
-            _exaggerationSlider = slider;
-        }
-
-        /// <summary>
-        /// True-scale 1x1 sprite so runtime-built UI Images render.
-        /// </summary>
-        private static Sprite MakeWhiteSprite()
-        {
-            var tex = new Texture2D(1, 1);
-            tex.SetPixel(0, 0, Color.white);
-            tex.Apply();
-            return Sprite.Create(tex, new Rect(0f, 0f, 1f, 1f), new Vector2(0.5f, 0.5f));
-        }
-
-        private void OnExaggerationChanged(float value)
-        {
-            _exaggerationValue = value;
-            if (_resultData != null && !_resultData.is_georeferenced) return;
-            UpdateExaggerationDisclosure();
-            if (_cachedHeightTex != null) BuildMesh();
-        }
-
-        /// <summary>
-        /// Show the disclosure whenever exaggeration differs from true scale.
-        /// </summary>
-        private void UpdateExaggerationDisclosure()
-        {
-            if (_exaggerationControl == null) return;
-            float effective = EffectiveExaggeration();
-            bool visible = Mathf.Abs(effective - 1f) > 0.001f;
-            _exaggerationControl.SetActive(visible);
-            if (!visible) return;
-            _exaggerationLabel.text =
-                $"Vertical scale exaggerated {effective:F1}x for visibility \u2014 not true elevation";
         }
 
         private void Update()

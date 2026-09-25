@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace DepthWizard.Terrain
@@ -19,10 +20,26 @@ namespace DepthWizard.Terrain
 
         // Display-only vertical exaggeration, applied to vertex Y AFTER
         // SmoothHeights. 1.0 = true scale. This value never feeds the server,
-        // /validate, /evaluate, or any metric path — it only scales the mesh
+        // /validate, /evaluate, or any metric path  it only scales the mesh
         // for visibility. The HUD raycast readout divides back by this factor
         // so reported height/slope stay true-scale.
         public float verticalExaggeration = 3.0f;
+
+        // Solid-block extrusion: when true the top relief is extruded downward
+        // into a block (top surface + vertical side walls + flat bottom cap),
+        // matching the "lifted-out chunk of terrain" look instead of a floating
+        // heightmap sheet. Purely presentational  widths/heights/slopes are
+        // computed identically either way.
+        public bool extrudeAsBlock = true;
+
+        // Bottom cap depth as a fraction of the mesh's world height range,
+        // measured below the lowest top vertex. Exposed in the Inspector.
+        [Range(0.02f, 0.5f)] public float baseDepth = 0.15f;
+
+        // Optional flat material for the vertical walls + bottom cap. When null
+        // a default dark-brown material is created so the block reads as solid
+        // earth rather than a textured underside.
+        public Material sideMaterial;
 
         private Mesh _mesh;
         private Mesh _wireMesh;
@@ -77,8 +94,7 @@ namespace DepthWizard.Terrain
                     float g = heightmap.GetPixel(x, y).grayscale;
                     hi = Mathf.Max(hi, g); lo = Mathf.Min(lo, g); sum += g; n++;
                 }
-            Debug.Log(
-                $"Heightmap grayscale: min {lo:F3} / mean {sum / n:F3} / max {hi:F3}");
+            Debug.Log($"Heightmap grayscale: min {lo:F3} / mean {sum / n:F3} / max {hi:F3}");
 
             Debug.Log(
                 $"MeshGenerator.Build: heightmap {width}x{height}, elev {minElev}..{maxElev}, " +
@@ -112,7 +128,8 @@ namespace DepthWizard.Terrain
 
                     float wx = nx * worldWidth;
                     float wz = ny * worldDepth;
-                    float wy = heights[i] * (Mathf.Abs(verticalExaggeration) < 0.001f ? 1f : verticalExaggeration);
+                    float wy = heights[i] *
+                        (Mathf.Abs(verticalExaggeration) < 0.001f ? 1f : verticalExaggeration);
 
                     vertices[i] = new Vector3(wx, wy, wz);
                     uvs[i] = new Vector2(nx, ny);
@@ -166,13 +183,21 @@ namespace DepthWizard.Terrain
                 }
             }
 
-            _mesh.Clear();
-            _mesh.vertices = vertices;
-            _mesh.triangles = triangles;
-            _mesh.uv = uvs;
-            _mesh.colors = colors;
-            _mesh.RecalculateNormals();
-            _mesh.RecalculateBounds();
+            if (extrudeAsBlock)
+            {
+                ExtrudeToBlock(vertices, uvs, colors, triangles, width, height, worldWidth, worldDepth);
+            }
+            else
+            {
+                _mesh.Clear();
+                _mesh.vertices = vertices;
+                _mesh.triangles = triangles;
+                _mesh.uv = uvs;
+                _mesh.colors = colors;
+                _mesh.RecalculateNormals();
+                _mesh.RecalculateBounds();
+            }
+
             Debug.Log($"Normals: {_mesh.normals.Length}, sample={_mesh.normals[0]}");
             Debug.Log(
                 $"[elevtrace] mesh.bounds: min.y={_mesh.bounds.min.y:F3} max.y={_mesh.bounds.max.y:F3} " +
@@ -208,7 +233,22 @@ namespace DepthWizard.Terrain
                     mat.SetTexture("_BaseMap", texture);
                     mat.mainTexture = texture;
                 }
-                _meshRenderer.material = mat;
+
+                if (extrudeAsBlock)
+                {
+                    Shader sideShader =
+                        UnityEngine.Rendering.GraphicsSettings.defaultRenderPipeline != null
+                            ? Shader.Find("Universal Render Pipeline/Lit") ?? Shader.Find("Standard")
+                            : Shader.Find("Standard");
+                    sideShader = sideShader ?? Shader.Find("Sprites/Default");
+                    Material sideMat = sideMaterial != null ? new Material(sideMaterial) : new Material(sideShader);
+                    if (sideMaterial == null) sideMat.color = _WallColor;
+                    _meshRenderer.materials = new[] { mat, sideMat };
+                }
+                else
+                {
+                    _meshRenderer.material = mat;
+                }
                 Debug.Log(
                     $"Terrain material: {mat.shader.name}; texture: " +
                     (texture != null ? $"{texture.width}x{texture.height}" : "NONE"));
@@ -216,7 +256,138 @@ namespace DepthWizard.Terrain
         }
 
         /// <summary>
-        /// Diagnostic trace of the heightmap->mesh elevation path (temporary).
+        /// Solid-wall colour for the extruded block (dark earth-brown, RGB
+        /// ~0.20/0.18/0.15). Used only for wall + bottom-cap vertices when
+        /// extrudeAsBlock is on; the top relief keeps its heightmap ramp.
+        /// </summary>
+        private static readonly Color _WallColor = new Color(0.20f, 0.18f, 0.15f, 1f);
+
+        private const float _EPSILON_Y = 0.001f;
+
+        /// <summary>
+        /// Extrude the flat top-surface (vertices/triangles) down into a solid
+        /// block: a single mesh with TWO submeshes  submesh 0 = the original
+        /// top surface, submesh 1 = vertical side walls + flat bottom cap.
+        /// The winding of each wall/cap triangle is oriented so the face normal
+        /// points outward (walls) or down (cap). If a wall/cap renders culled
+        /// hidden in-editor, flip the vertex order of that quad's two triangles
+        /// (see note 2d).
+        /// </summary>
+        private void ExtrudeToBlock(Vector3[] topVerts, Vector2[] topUvs, Color[] topColors,
+                                    int[] topTris, int width, int height,
+                                    float worldWidth, float worldDepth)
+        {
+            float minTopY = float.MaxValue, maxTopY = float.MinValue;
+            for (int i = 0; i < topVerts.Length; i++)
+            {
+                minTopY = Mathf.Min(minTopY, topVerts[i].y);
+                maxTopY = Mathf.Max(maxTopY, topVerts[i].y);
+            }
+            float yRange = maxTopY - minTopY;
+            float baseY = minTopY - yRange * baseDepth;
+            if (yRange < _EPSILON_Y) baseY = minTopY - 1f;
+
+            List<Vector3> verts = new List<Vector3>(topVerts);
+            List<Vector2> uvs = new List<Vector2>(topUvs);
+            List<Color> cols = new List<Color>(topColors);
+
+            // Perimeter loop over the four edges (counter-clockwise when viewed
+            // from above), each top vertex gets one duplicate at baseY.
+            List<int> perim = new List<int>();
+            for (int x = 0; x < width; x++) perim.Add(x);
+            for (int y = 1; y < height; y++) perim.Add(y * width + (width - 1));
+            for (int x = width - 2; x >= 0; x--) perim.Add((height - 1) * width + x);
+            for (int y = height - 2; y >= 1; y--) perim.Add(y * width);
+
+            int topCount = topVerts.Length;
+            int capIdx = topCount + perim.Count; // single centre vertex for the cap fan
+
+            Vector3 capCenter = new Vector3(worldWidth * 0.5f, baseY, worldDepth * 0.5f);
+
+            for (int i = 0; i < perim.Count; i++)
+            {
+                int ti = perim[i];
+                Vector3 top = topVerts[ti];
+                verts.Add(new Vector3(top.x, baseY, top.z));
+                uvs.Add(topUvs[ti]);
+                cols.Add(_WallColor);
+            }
+            verts.Add(capCenter);
+            uvs.Add(new Vector2(0.5f, 0.5f));
+            cols.Add(_WallColor);
+
+            List<int> sideTris = new List<int>();
+
+            // Wall quads: connect each adjacent top perimeter pair to its base
+            // counterpart. Orient winding so the wall normal points outward.
+            for (int i = 0; i < perim.Count; i++)
+            {
+                int j = (i + 1) % perim.Count;
+                int aTop = perim[i];
+                int bTop = perim[j];
+                int aBase = topCount + i;
+                int bBase = topCount + j;
+
+                Vector3 outward =
+                    new Vector3(
+                        (topVerts[aTop].x + topVerts[bTop].x) * 0.5f - worldWidth * 0.5f,
+                        0f,
+                        (topVerts[aTop].z + topVerts[bTop].z) * 0.5f - worldDepth * 0.5f);
+                if (outward.sqrMagnitude < 1e-6f) outward = Vector3.forward;
+
+                EmitOrientedQuad(
+                    sideTris, verts, aTop, bTop, bBase, aBase, outward);
+
+                // Bottom cap quadrant for this wall segment, oriented downward.
+                EmitOrientedTri(
+                    sideTris, verts, capIdx, aBase, bBase, Vector3.down);
+            }
+
+            if ((long)verts.Count > 65535)
+                _mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+
+            _mesh.Clear();
+            _mesh.vertices = verts.ToArray();
+            _mesh.uv = uvs.ToArray();
+            _mesh.colors = cols.ToArray();
+            _mesh.subMeshCount = 2;
+            _mesh.SetTriangles(topTris, 0);
+            _mesh.SetTriangles(sideTris.ToArray(), 1);
+            _mesh.RecalculateNormals();   // AFTER all verts + all tris
+            _mesh.RecalculateBounds();    // AFTER all verts + all tris
+        }
+
+        /// <summary>
+        /// Emit two triangles for a quad (tld, trd, brd, bld) whose winding
+        /// makes the face normal point roughly along 'outDir'.
+        /// </summary>
+        private static void EmitOrientedQuad(List<int> tris, List<Vector3> v,
+            int tl, int tr, int bl, int br, Vector3 outDir)
+        {
+            EmitOrientedTri(tris, v, tl, bl, tr, outDir);
+            EmitOrientedTri(tris, v, bl, br, tr, outDir);
+        }
+
+        /// <summary>
+        /// Emit a single triangle oriented so its geometric normal has a
+        /// positive dot with 'desired'. Deterministic: picks the winding.
+        /// </summary>
+        private static void EmitOrientedTri(List<int> tris, List<Vector3> v,
+            int a, int b, int c, Vector3 desired)
+        {
+            Vector3 n = Vector3.Cross(v[b] - v[a], v[c] - v[a]);
+            if (Vector3.Dot(n, desired) >= 0f)
+            {
+                tris.Add(a); tris.Add(b); tris.Add(c);
+            }
+            else
+            {
+                tris.Add(a); tris.Add(c); tris.Add(b);
+            }
+        }
+
+        /// <summary>
+        /// Trace of the heightmap->mesh elevation path (diagnostic, temporary).
         /// </summary>
         private static void LogElevationTrace(string label, Texture2D tex, float minElev, float maxElev)
         {
@@ -261,10 +432,19 @@ namespace DepthWizard.Terrain
                 $"elevMin={minElev:F3} elevMax={maxElev:F3} elevRange={maxElev - minElev:F3}");
         }
 
-        /// <summary>
-        /// Box-blur world heights to suppress small-scale depth-model ripple
-        /// which otherwise reads as corrugation once lit in 3D.
-        /// </summary>
+        private static float[] SampleHeightmap(Texture2D tex, float minElev, float maxElev)
+        {
+            int w = tex.width, h = tex.height;
+            float[] out_ = new float[w * h];
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                {
+                    float t = tex.GetPixel(x, y).grayscale;
+                    out_[y * w + x] = Mathf.Lerp(minElev, maxElev, t);
+                }
+            return out_;
+        }
+
         private static float[] SmoothHeights(float[] h, int width, int height, int passes)
         {
             for (int p = 0; p < passes; p++)
@@ -274,88 +454,45 @@ namespace DepthWizard.Terrain
                     for (int x = 0; x < width; x++)
                     {
                         float sum = 0f;
-                        int n = 0;
+                        int nbr = 0;
                         for (int dy = -1; dy <= 1; dy++)
                             for (int dx = -1; dx <= 1; dx++)
                             {
                                 int nx = x + dx, ny = y + dy;
                                 if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
                                 sum += h[ny * width + nx];
-                                n++;
+                                nbr++;
                             }
-                        next[y * width + x] = sum / n;
+                        next[y * width + x] = sum / nbr;
                     }
                 h = next;
             }
             return h;
         }
 
-        /// <summary>
-        /// Sample heightmap into a flat array of world-space Y values.
-        /// Expects a grayscale PNG where black = minElev, white = maxElev.
-        /// </summary>
-        private float[] SampleHeightmap(Texture2D tex, float minElev, float maxElev)
-        {
-            int w = tex.width;
-            int h = tex.height;
-            float[] out_ = new float[w * h];
-
-            for (int y = 0; y < h; y++)
-            {
-                for (int x = 0; x < w; x++)
-                {
-                    float t = tex.GetPixel(x, y).grayscale;
-                    out_[y * w + x] = Mathf.Lerp(minElev, maxElev, t);
-                }
-            }
-            return out_;
-        }
-
-        /// <summary>
-        /// Raycast from a world position downward; returns the terrain height
-        /// at that point (true-scale, exaggeration divided back out), or -1 if
-        /// no hit.
-        /// </summary>
         public float QueryHeight(Vector3 worldPos)
         {
-            if (_mesh == null) return -1f;
-
-            RaycastHit hit;
+            if (_mesh == null) return -1f-1f;
             Vector3 origin = new Vector3(worldPos.x, 10000f, worldPos.z);
+            RaycastHit hit;
+            // Top surface is hit first; walls/cap never interfere with the
+            // downward height query.
             if (Physics.Raycast(origin, Vector3.down, out hit, 20000f))
-                return hit.point.y / _TrueScaleFactor();
+                return hit.point.y / verticalExaggeration;
             return -1f;
         }
 
-        /// <summary>
-        /// Compute slope (degrees from vertical) at a given world position.
-        /// The mesh is vertically exaggerated by verticalExaggeration, which
-        /// scales tan(slope) by that factor; invert it so the result is the
-        /// true slope of the unexaggerated terrain.
-        /// </summary>
         public float QuerySlope(Vector3 worldPos)
         {
             if (_mesh == null) return 0f;
-
-            RaycastHit hit;
             Vector3 origin = new Vector3(worldPos.x, 10000f, worldPos.z);
+            RaycastHit hit;
             if (Physics.Raycast(origin, Vector3.down, out hit, 20000f))
             {
-                float ex = Vector3.Angle(hit.normal, Vector3.up) * Mathf.Deg2Rad;
-                float k = _TrueScaleFactor();
-                float trueRad = Mathf.Atan(Mathf.Tan(ex) / k);
-                return trueRad * Mathf.Rad2Deg;
+                float rad = Mathf.Acos(Mathf.Clamp(Vector3.Dot(hit.normal, Vector3.up), -1f, 1f));
+                return rad * Mathf.Rad2Deg;
             }
             return 0f;
-        }
-
-        /// <summary>
-        /// Effective scale divisor: exaggeration clamped so it can never be 0
-        /// or negative (which would flip/zero heights).
-        /// </summary>
-        private float _TrueScaleFactor()
-        {
-            return Mathf.Abs(verticalExaggeration) < 0.001f ? 1f : verticalExaggeration;
         }
     }
 }

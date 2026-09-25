@@ -129,3 +129,37 @@ def test_save_load_fit_round_trip(tmp_path):
     np.testing.assert_array_equal(loaded.held_reference, fit.held_reference)
     # legacy jobs simply have no file -> None, never a crash
     assert calib.load_fit(tmp_path / "missing.npz") is None
+
+
+def test_ransac_sign_flip_falls_back_to_ols_scale():
+    """RANSAC can lock onto a tight minority sub-population with a NEGATIVE
+    slope while the global (train-split) trend is POSITIVE - the sparse_01
+    pathology (raw corr +0.585, RANSAC scale -159). The fit must then use the
+    OLS scale of the full train split (positive), keep it un-flipped, and flag
+    the instability as ransac_sign_disagreement instead of emitting a negative
+    calibration that would fake a REVERSED verdict."""
+    rng = np.random.default_rng(7)
+    n = 4096
+    d = rng.uniform(0, 1, n)
+    is_band = rng.random(n) < 0.85
+    h = np.where(is_band,
+                 -400.0 * d + 350.0 + rng.normal(0, 2.0, n),
+                 3000.0 * d + 1000.0 + rng.normal(0, 2.0, n))
+    fit = calib.fit_affine(d.reshape(64, 64), h.reshape(64, 64))
+    assert fit.scale > 0.0
+    assert fit.calibration_warning == "ransac_sign_disagreement"
+    assert fit.polarity_inverted is False
+
+
+def test_genuinely_inverted_keeps_negative_scale_and_flags_polarity():
+    """A genuinely inverted model output (train-split raw correlation clearly
+    negative) keeps its negative scale - never abs()'d - and is flagged
+    polarity_inverted=True, because the inversion is real, not a fit artifact."""
+    rng = np.random.default_rng(3)
+    d = rng.uniform(0, 1, (64, 64))
+    h = -200.0 * d + 400.0 + rng.normal(0, 20.0, d.shape)
+    fit = calib.fit_affine(d, h)
+    assert fit.scale < 0.0
+    assert fit.calibration_warning == "negative_scale"
+    assert fit.polarity_inverted is True
+    assert "inverted relative to the reference" in fit.polarity_reason

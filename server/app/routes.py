@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from . import config, db, jobs
 from .errors import DepthWizardError
@@ -52,6 +52,24 @@ async def upload(file: UploadFile = File(...)) -> UploadResponse:
         crs=info.get("crs"),
         bounds=info.get("bounds"),
     )
+
+
+@router.get("/preview/{upload_id}")
+def preview(upload_id: str) -> Response:
+    """Low-res PNG thumbnail of an uploaded file (Unity pre-Process preview).
+
+    Renders the already-ingested working raster via uploader.render_preview_png
+    (rasterio for GeoTIFF, Pillow for PNG/JPG). Purely cosmetic; never feeds
+    the pipeline or metrics.
+    """
+    up = db.get_upload(upload_id)
+    if up is None:
+        raise HTTPException(status_code=404, detail=ErrorResponse(error="not_found", message="Upload not found").model_dump())
+    try:
+        png = uploader.render_preview_png(Path(up["file_path"]))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=ErrorResponse(error="preview_failed", message=f"Preview unavailable: {e}").model_dump())
+    return Response(content=png, media_type="image/png")
 
 
 @router.post("/process/{upload_id}", response_model=ProcessResponse)
@@ -235,7 +253,9 @@ async def evaluate(image: UploadFile = File(...),
                                      "correlation_reason", "valid_pixels",
                                      "total_pixels", "held_out_pixel_count",
                                      "calibration_status", "calibration_warning",
-                                     "calibration_scale", "calibration_offset"}}
+                                     "calibration_scale", "calibration_offset",
+                                     "raw_correlation_signed", "scale_sign",
+                                     "polarity_inverted", "polarity_reason"}}
         try:
             artifacts.export_prediction_artifacts(
                 out_root=config.OUTPUT_DIR,

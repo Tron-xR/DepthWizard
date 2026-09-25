@@ -75,6 +75,41 @@ def test_upload_bad_file(client):
     assert resp.json()["detail"]["error"] == "corrupt_image"
 
 
+def test_preview_png(client):
+    up = _upload_png(client)
+    resp = client.get(f"/preview/{up['upload_id']}")
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"] == "image/png"
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(resp.content))
+    assert img.width <= 256 and img.height <= 256
+
+
+def test_preview_geotiff(client):
+    from PIL import Image
+    from rasterio.transform import from_origin
+
+    elev = np.arange(1600, dtype="float32").reshape(40, 40)
+    path = Path(config.FILES_DIR).parent / "preview_geo.tif"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_geotiff(path, elev, minx=500000.0, maxy=4650000.0, cell=30.0)
+    with open(path, "rb") as f:
+        resp = client.post("/upload", files={"file": ("geo.tif", f.read(), "image/tiff")})
+    assert resp.status_code == 200, resp.text
+    up = resp.json()
+
+    resp = client.get(f"/preview/{up['upload_id']}")
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"] == "image/png"
+    img = Image.open(io.BytesIO(resp.content))
+    assert img.width <= 256 and img.height <= 256
+
+
+def test_preview_unknown_404(client):
+    assert client.get("/preview/nope").status_code == 404
+
+
 def test_full_relative_flow(client):
     up = _upload_png(client)
     proc = client.post(f"/process/{up['upload_id']}")

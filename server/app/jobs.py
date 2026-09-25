@@ -241,6 +241,31 @@ def run_validation(job_id: str, *, save_artifacts: bool = False) -> dict:
         metrics = vmod.compute_metrics(pred, ref)
         held_out_count = None
 
+    # Uncalibrated model polarity: raw relative depth vs reference correlation on
+    # the SAME held-out 20% (or whole grid for legacy jobs without a persisted
+    # fit), before any calibration sign flip.
+    if fit is not None and not fit.degenerate \
+            and fit.held_relative is not None and fit.held_relative.size >= 2:
+        raw_corr_signed, _ = vmod.correlation_and_reason(fit.held_relative,
+                                                         fit.held_reference)
+    else:
+        raw_corr_signed, _ = vmod.correlation_and_reason(pred, ref)
+    if fit is not None:
+        scale_sign = "+" if fit.scale >= 0 else "-"
+    else:
+        scale_sign = None
+    polarity_inverted = fit.polarity_inverted if fit is not None else None
+    polarity_reason = fit.polarity_reason if fit is not None else None
+
+    correlation_reason = metrics.get("correlation_reason")
+    if fit is not None and fit.scale < 0 and metrics.get("correlation") is not None:
+        correlation_reason = (
+            "negative calibration scale: model output is inverted relative to the "
+            f"reference (raw_correlation_signed={raw_corr_signed:+.3f}); the reported "
+            "calibrated correlation has the flipped polarity - use "
+            "raw_correlation_signed for the unflipped model signal"
+        )
+
     # Calibration health surfaced from the persisted fit. Legacy jobs with no
     # held_out.npz are None here (no fit), but correlation_reason still applies.
     calib_status = fit.calibration_status if fit is not None else None
@@ -251,11 +276,15 @@ def run_validation(job_id: str, *, save_artifacts: bool = False) -> dict:
         artifact_metrics = {k: v for k, v in {
             "mae": metrics["mae"], "rmse": metrics["rmse"],
             "correlation": metrics["correlation"],
-            "correlation_reason": metrics.get("correlation_reason"),
+            "correlation_reason": correlation_reason,
             "calibration_status": calib_status,
             "calibration_warning": calib_warning,
             "calibration_scale": calib_scale,
             "calibration_offset": (fit.offset if fit is not None else None),
+            "raw_correlation_signed": raw_corr_signed,
+            "scale_sign": scale_sign,
+            "polarity_inverted": polarity_inverted,
+            "polarity_reason": polarity_reason,
         }.items() if v is not None}
         artifacts.export_prediction_artifacts(
             out_root=config.OUTPUT_DIR,
@@ -293,7 +322,7 @@ def run_validation(job_id: str, *, save_artifacts: bool = False) -> dict:
         "rmse": metrics["rmse"],
         "mae": metrics["mae"],
         "correlation": metrics["correlation"],
-        "correlation_reason": metrics.get("correlation_reason"),
+        "correlation_reason": correlation_reason,
         "diff_heatmap_url": f"/files/{job_id}/diff_heatmap.png",
         "held_out_pixel_count": held_out_count,
         "degenerate_calibration": degenerate_calibration,
@@ -302,6 +331,10 @@ def run_validation(job_id: str, *, save_artifacts: bool = False) -> dict:
         "calibration_warning": calib_warning,
         "calibration_scale": calib_scale,
         "calibration_offset": (fit.offset if fit is not None else None),
+        "raw_correlation_signed": raw_corr_signed,
+        "scale_sign": scale_sign,
+        "polarity_inverted": polarity_inverted,
+        "polarity_reason": polarity_reason,
     }
 
 

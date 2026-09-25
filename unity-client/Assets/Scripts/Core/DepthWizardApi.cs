@@ -58,6 +58,20 @@ namespace DepthWizard.Core
         // near-degenerate tiles. The job itself still completed normally.
         public bool degenerate_calibration;
         public string calibration_reason;
+        // Uncalibrated model polarity fields (server /validate + /evaluate).
+        // raw_correlation_signed is the held-out raw correlation BEFORE any
+        // calibration sign flip; scale_sign is "+" / "-" of the fitted scale.
+        // polarity_inverted true = model signal clearly inverted. All Optional
+        // on the server: JsonUtility maps missing/null to defaults, so the
+        // has* presence flags below (set after deserialization) decide whether
+        // a line is shown at all.
+        public float raw_correlation_signed;
+        public string scale_sign;
+        public bool polarity_inverted;
+        public string polarity_reason;
+        [System.NonSerialized] public bool hasRawCorrelation;
+        [System.NonSerialized] public bool hasPolarityInverted;
+        [System.NonSerialized] public bool hasPolarityReason;
     }
 
     [Serializable]
@@ -177,9 +191,40 @@ namespace DepthWizard.Core
                     yield break;
                 }
 
-                var resp = JsonUtility.FromJson<ValidationResponse>(req.downloadHandler.text);
+                string body = req.downloadHandler.text;
+                var resp = JsonUtility.FromJson<ValidationResponse>(body);
+                // Older servers / Optional fields that serialize to null become
+                // type defaults under JsonUtility (0 / false / ""); record which
+                // polarity fields were actually present with a real value so the
+                // UI can omit those lines instead of showing "0.000".
+                if (body != null)
+                {
+                    resp.hasRawCorrelation = HasNonNullField(body, "raw_correlation_signed");
+                    resp.hasPolarityInverted = HasNonNullField(body, "polarity_inverted");
+                    resp.hasPolarityReason = HasNonNullField(body, "polarity_reason");
+                }
                 onSuccess?.Invoke(resp);
             }
+        }
+
+        // True when body contains '"name": <non-null>' for the given JSON field.
+        private static bool HasNonNullField(string body, string name)
+        {
+            string key = "\"" + name + "\"";
+            int idx = body.IndexOf(key, StringComparison.Ordinal);
+            while (idx >= 0)
+            {
+                int colon = body.IndexOf(':', idx + key.Length);
+                if (colon >= 0)
+                {
+                    int i = colon + 1;
+                    while (i < body.Length && (body[i] == ' ' || body[i] == '\t')) i++;
+                    if (i < body.Length && body[i] != 'n')
+                        return true;
+                }
+                idx = body.IndexOf(key, idx + key.Length, StringComparison.Ordinal);
+            }
+            return false;
         }
 
         private static string ParseErrorMessage(string body)

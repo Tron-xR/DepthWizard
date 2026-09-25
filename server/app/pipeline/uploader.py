@@ -109,6 +109,40 @@ def _downsample_array(arr, max_dim: int) -> tuple:
     return out, scale
 
 
+def _preview_rgb(arr) -> np.ndarray:
+    """float[bands,H,W] -> uint8[H,W,3] for a cosmetic thumbnail."""
+    import numpy as np
+
+    if arr.ndim == 3 and arr.shape[0] >= 3:
+        img = arr[:3].transpose(1, 2, 0)
+    elif arr.ndim == 3 and arr.shape[0] == 1:
+        img = np.stack([arr[0]] * 3, axis=-1)
+    else:
+        img = arr.transpose(1, 2, 0) if arr.ndim == 3 else arr
+
+    lo, hi = float(img.min()), float(img.max())
+    out = ((img - lo) / (hi - lo) * 255.0) if hi > lo else np.zeros_like(img)
+    return np.clip(out, 0, 255).astype("uint8")
+
+
+def render_preview_png(path: Path, max_dim: int = 256) -> bytes:
+    """Render a small PNG thumbnail of the cached working raster.
+
+    Purely cosmetic (Unity file-picker preview): reads back the already
+    downsampled working file via load_raster and 8-bit normalizes it. Never
+    used by the pipeline or metrics.
+    """
+    import io
+
+    arr, _ = load_raster(path)
+    img = Image.fromarray(_preview_rgb(arr), "RGB")
+    if max(img.size) > max_dim:
+        img.thumbnail((max_dim, max_dim), Image.BILINEAR)
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
 def ingest_upload(file_bytes: bytes, filename: str) -> dict:
     """Persist an uploaded file into the cache and return metadata.
 

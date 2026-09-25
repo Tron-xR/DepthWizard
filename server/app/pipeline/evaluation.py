@@ -157,6 +157,10 @@ def evaluate_prediction_truth(relative_depth: np.ndarray, dem: np.ndarray, *,
         "calibration_warning": None,
         "calibration_scale": None,
         "calibration_offset": None,
+        "raw_correlation_signed": None,
+        "scale_sign": None,
+        "polarity_inverted": None,
+        "polarity_reason": None,
     }
 
     # No variance on either side => neither an affine calibration nor a
@@ -168,6 +172,7 @@ def evaluate_prediction_truth(relative_depth: np.ndarray, dem: np.ndarray, *,
             "mae": None, "rmse": None,
             "correlation": corr,
             "correlation_reason": corr_reason,
+            "raw_correlation_signed": corr,
             "evaluated_units": "calibrated absolute elevation",
             "reason": "no variance in prediction and/or ground truth: calibration and "
                       "correlation are undefined",
@@ -180,6 +185,7 @@ def evaluate_prediction_truth(relative_depth: np.ndarray, dem: np.ndarray, *,
             "mae": None, "rmse": None,
             "correlation": corr,
             "correlation_reason": corr_reason,
+            "raw_correlation_signed": corr,
             "evaluated_units": "relative depth (uncalibrated)",
             "reason": "relative depth, uncalibrated",
         }
@@ -191,6 +197,7 @@ def evaluate_prediction_truth(relative_depth: np.ndarray, dem: np.ndarray, *,
             "mae": None, "rmse": None,
             "correlation": corr,
             "correlation_reason": corr_reason,
+            "raw_correlation_signed": corr,
             "evaluated_units": "relative depth (uncalibrated)",
             "reason": "fewer than 16 valid pixels: not enough to fit the scale/offset "
                       "calibration; reporting raw relative-depth correlation only",
@@ -209,6 +216,10 @@ def evaluate_prediction_truth(relative_depth: np.ndarray, dem: np.ndarray, *,
             "mae": None, "rmse": None,
             "correlation": corr,
             "correlation_reason": corr_reason,
+            "raw_correlation_signed": corr,
+            "scale_sign": "+" if fit.scale >= 0 else "-",
+            "polarity_inverted": fit.polarity_inverted,
+            "polarity_reason": fit.polarity_reason,
             "evaluated_units": "calibrated absolute elevation",
             "reason": "calibration degenerate: the fitted (80%) surface had no variance "
                       "(e.g. flat prediction), so no scale/offset is meaningful; "
@@ -228,6 +239,20 @@ def evaluate_prediction_truth(relative_depth: np.ndarray, dem: np.ndarray, *,
 
     metrics = compute_metrics(held_pred, held_truth)
     corr, corr_reason = correlation_and_reason(held_pred, held_truth)
+
+    # Uncalibrated model polarity on the SAME held-out 20%: correlation of the
+    # raw relative depth vs the reference, before any calibration sign flip.
+    raw_held_corr, _ = correlation_and_reason(fit.held_relative, fit.held_reference)
+    # A negative fitted scale means the model output is inverted relative to the
+    # reference (calibrated correlation is polarity-flipped); say so explicitly
+    # instead of reporting a positive correlation that hides the inversion.
+    if fit.scale < 0 and corr is not None:
+        corr_reason = (
+            "negative calibration scale: model output is inverted relative to the "
+            f"reference (raw_correlation_signed={raw_held_corr:+.3f}); the reported "
+            "calibrated correlation has the flipped polarity - use "
+            "raw_correlation_signed for the unflipped model signal"
+        )
 
     # Calibrated elevation over the whole grid (NaN outside the valid mask),
     # exposed so the route can render a visualization the caller opted into.
@@ -252,6 +277,10 @@ def evaluate_prediction_truth(relative_depth: np.ndarray, dem: np.ndarray, *,
         "calibration_warning": fit.calibration_warning,
         "calibration_scale": fit.scale,
         "calibration_offset": fit.offset,
+        "raw_correlation_signed": raw_held_corr,
+        "scale_sign": "+" if fit.scale >= 0 else "-",
+        "polarity_inverted": fit.polarity_inverted,
+        "polarity_reason": fit.polarity_reason,
         "predicted_elevation": predicted_elevation,
         "ground_truth": ground_truth,
     }

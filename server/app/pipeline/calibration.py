@@ -44,6 +44,13 @@ _WARN_NEGATIVE_SCALE = "negative_scale"
 _WARN_NEAR_CONSTANT = "prediction_near_constant"
 _WARN_NEAR_ZERO_SCALE = "near_zero_scale"
 _WARN_INSUFFICIENT_VARIANCE = "insufficient_variance"
+_WARN_RANSAC_SIGN_DISAGREEMENT = "ransac_sign_disagreement"
+
+# Model-polarity threshold on the TRAIN-split raw correlation (relative depth
+# vs true elevation): below this the model output is treated as inverted
+# relative to the reference (brighter=lower). Independent of calibration
+# stability; a RANSAC sign flip does NOT imply inversion and vice versa.
+_POLARITY_NEG_THRESHOLD = -0.25
 
 
 @dataclass
@@ -69,6 +76,12 @@ class CalibrationFit:
     calibration_warning: Optional[str] = None
     pred_std: Optional[float] = None   # std of prediction used for the fit
     ref_std: Optional[float] = None    # std of reference used for the fit
+    # Model polarity, measured on the TRAIN-split raw correlation (independent
+    # of calibration): True when it is clearly negative (model output inverted
+    # relative to the reference), False when positive, None when undefined
+    # (constant prediction/reference on the train split).
+    polarity_inverted: Optional[bool] = None
+    polarity_reason: Optional[str] = None
 
 
 def fit_affine(relative_d: np.ndarray, reference_h: np.ndarray) -> CalibrationFit:
@@ -100,6 +113,23 @@ def fit_affine(relative_d: np.ndarray, reference_h: np.ndarray) -> CalibrationFi
 
     X = d_train.reshape(-1, 1)
 
+    # Model polarity from the TRAIN-split raw correlation (never the full grid,
+    # never held-out). Independent of whatever calibration sign RANSAC later
+    # picks: a RANSAC flip is a FIT artifact, not evidence about the model.
+    if np.std(d_train) == 0.0 or np.std(h_train) == 0.0:
+        polarity_inverted, polarity_reason = None, (
+            "undefined: prediction or reference is constant on the training split")
+    else:
+        _train_corr = float(np.corrcoef(d_train, h_train)[0, 1])
+        polarity_inverted = bool(_train_corr < _POLARITY_NEG_THRESHOLD)
+        polarity_reason = (
+            f"train-split raw correlation {_train_corr:+.3f} < {_POLARITY_NEG_THRESHOLD}: "
+            "model output is inverted relative to the reference"
+            if polarity_inverted else
+            f"train-split raw correlation {_train_corr:+.3f}: "
+            "model polarity agrees with the reference"
+        )
+
     # Degenerate fit: the training 80% holds (nearly) no variance (e.g. a
     # flat GAN output), so RANSAC would raise or fit garbage. Return a constant
     # elevation fit instead of crashing (happens on flat imagery / constant rDSM).
@@ -114,6 +144,8 @@ def fit_affine(relative_d: np.ndarray, reference_h: np.ndarray) -> CalibrationFi
             calibration_status="degenerate",
             calibration_warning=_WARN_NEAR_CONSTANT,
             pred_std=sp, ref_std=sr,
+            polarity_inverted=polarity_inverted,
+            polarity_reason=polarity_reason,
         )
 
     # RANSAC to find inliers on the training data
@@ -138,14 +170,33 @@ def fit_affine(relative_d: np.ndarray, reference_h: np.ndarray) -> CalibrationFi
             calibration_status="degenerate",
             calibration_warning=_WARN_INSUFFICIENT_VARIANCE,
             pred_std=sp, ref_std=sr,
+            polarity_inverted=polarity_inverted,
+            polarity_reason=polarity_reason,
         )
     inlier_mask = ransac.inlier_mask_
 
-    # Refit OLS on inliers for a stable, low-variance estimate
-    lr = LinearRegression().fit(X[inlier_mask], h_train[inlier_mask])
-    scale = float(lr.coef_[0])
-    offset = float(lr.intercept_)
+    # Refit OLS on the RANSAC inliers (stable, low-variance estimate) AND on the
+    # SAME train split as a whole. When the two disagree on sign, RANSAC has
+    # locked onto a near-orthogonal sub-population (a documented artifact on
+    # noisy predictors, e.g. sparse_01: raw corr +0.585 but RANSAC scale -159).
+    # Then trust the OLS sign of the full train split and flag the flip.
+    ransac_lr = LinearRegression().fit(X[inlier_mask], h_train[inlier_mask])
+    ols_lr = LinearRegression().fit(X, h_train)
+    ransac_scale = float(ransac_lr.coef_[0])
+    ols_scale = float(ols_lr.coef_[0])
+    ols_offset = float(ols_lr.intercept_)
     n_inliers = int(inlier_mask.sum())
+
+    def _sign(v):
+        return 1 if v >= 0.0 else -1
+
+    if _sign(ransac_scale) != _sign(ols_scale):
+        scale, offset = ols_scale, ols_offset
+        sign_disagreement = True
+    else:
+        scale, offset = ransac_scale, float(ransac_lr.intercept_)
+        sign_disagreement = False
+
     pred = scale * d_train + offset
     rmse = float(np.sqrt(np.mean((pred - h_train) ** 2)))
 
@@ -169,6 +220,8 @@ def fit_affine(relative_d: np.ndarray, reference_h: np.ndarray) -> CalibrationFi
             calibration_status="degenerate",
             calibration_warning=_WARN_NEAR_ZERO_SCALE,
             pred_std=sp, ref_std=sr,
+            polarity_inverted=polarity_inverted,
+            polarity_reason=polarity_reason,
         )
 
     # Classify fit health (informational). The fit is numerically VALID and
@@ -181,7 +234,9 @@ def fit_affine(relative_d: np.ndarray, reference_h: np.ndarray) -> CalibrationFi
     #                             own variance (model output effectively flat).
     rel_std = sp / sr if sr > 0.0 else float("inf")
     warning = None
-    if scale < 0.0:
+    if sign_disagreement:
+        warning = _WARN_RANSAC_SIGN_DISAGREEMENT
+    elif scale < 0.0:
         warning = _WARN_NEGATIVE_SCALE
     elif rel_std < config.MIN_RELATIVE_STD:
         warning = _WARN_NEAR_CONSTANT
@@ -200,6 +255,8 @@ def fit_affine(relative_d: np.ndarray, reference_h: np.ndarray) -> CalibrationFi
         calibration_warning=warning,
         pred_std=sp,
         ref_std=sr,
+        polarity_inverted=polarity_inverted,
+        polarity_reason=polarity_reason,
     )
 
 
@@ -241,6 +298,9 @@ def save_fit(fit: CalibrationFit, path: Path) -> None:
         degenerate=np.int8(fit.degenerate),
         calibration_status=np.asarray(fit.calibration_status),
         calibration_warning=np.asarray(fit.calibration_warning or ""),
+        polarity_inverted=np.int8(-1) if fit.polarity_inverted is None
+        else np.int8(int(fit.polarity_inverted)),
+        polarity_reason=np.asarray(fit.polarity_reason or ""),
         held_relative=held_r,
         held_reference=held_h,
     )
@@ -265,6 +325,14 @@ def load_fit(path: Path) -> Optional[CalibrationFit]:
         cal_warn_raw = z["calibration_warning"] if "calibration_warning" in z.files else np.asarray("")
         cal_warn_raw = cal_warn_raw.item() if cal_warn_raw.size else ""
         cal_warn = str(cal_warn_raw) if cal_warn_raw else None
+        if "polarity_inverted" in z.files:
+            p_inv_raw = int(np.asarray(z["polarity_inverted"]).item())
+            polarity_inverted = None if p_inv_raw < 0 else bool(p_inv_raw)
+        else:
+            polarity_inverted = None
+        p_reason_raw = z["polarity_reason"] if "polarity_reason" in z.files else np.asarray("")
+        p_reason_raw = p_reason_raw.item() if p_reason_raw.size else ""
+        polarity_reason = str(p_reason_raw) if p_reason_raw else None
         return CalibrationFit(
             scale=float(z["scale"]),
             offset=float(z["offset"]),
@@ -277,6 +345,8 @@ def load_fit(path: Path) -> Optional[CalibrationFit]:
             held_reference=held_reference,
             calibration_status=cal_status,
             calibration_warning=cal_warn,
+            polarity_inverted=polarity_inverted,
+            polarity_reason=polarity_reason,
         )
 
 

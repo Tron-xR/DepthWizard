@@ -19,9 +19,17 @@ namespace DepthWizard.UI
         [SerializeField] private TextMeshProUGUI _geoInfoText;
         [SerializeField] private TextMeshProUGUI _errorText;
 
+        private const int MaxPreviewDim = 512;
+        private const float PreviewBoxSize = 240f;
+        private const float PreviewX = -390f;
+        private const float PreviewY = 109f;
+
         private Launcher _launcher;
         private string _selectedPath;
         private UploadResponse _lastUpload;
+        private RawImage _previewImage;
+        private Text _previewNote;
+        private Texture2D _previewTex;
 
         private void Awake()
         {
@@ -37,6 +45,9 @@ namespace DepthWizard.UI
             _errorText.text = "";
             _geoInfoText.text = "";
             _filePathText.text = "No file selected";
+
+            EnsurePreview();
+            ClearPreview();
         }
 
         private void OnDisable()
@@ -44,6 +55,7 @@ namespace DepthWizard.UI
             _browseButton.onClick.RemoveListener(OnBrowse);
             _processButton.onClick.RemoveListener(OnProcess);
             _backButton.onClick.RemoveListener(OnBack);
+            ClearPreview();
         }
 
         private void OnBrowse()
@@ -77,6 +89,7 @@ namespace DepthWizard.UI
             _processButton.interactable = false;
 
             UploadFile(path);
+            ShowPreview(path);
         }
 
         private void UploadFile(string path)
@@ -90,6 +103,9 @@ namespace DepthWizard.UI
                         : "No geo metadata \u2014 relative mode";
                     _geoInfoText.text = geoLabel;
                     _processButton.interactable = true;
+
+                    if (IsTiff(path))
+                        StartCoroutine(ShowServerPreview(resp.upload_id));
                 },
                 onError: err =>
                 {
@@ -125,6 +141,194 @@ namespace DepthWizard.UI
         {
             _launcher.ShowMainMenu();
         }
+
+        #region Thumbnail preview
+
+        private void EnsurePreview()
+        {
+            if (_previewImage != null) return;
+
+            var go = new GameObject("ThumbnailPreview",
+                typeof(RectTransform), typeof(CanvasRenderer));
+            RectTransform rt = go.GetComponent<RectTransform>();
+            rt.SetParent(transform, false);
+            rt.anchorMin = new Vector2(0.5f, 0.5f);
+            rt.anchorMax = new Vector2(0.5f, 0.5f);
+            rt.pivot = new Vector2(0.5f, 0.5f);
+            rt.anchoredPosition = new Vector2(PreviewX, PreviewY);
+            rt.sizeDelta = new Vector2(PreviewBoxSize, PreviewBoxSize);
+
+            _previewImage = go.AddComponent<RawImage>();
+            _previewImage.color = new Color(0.85f, 0.85f, 0.85f, 1f);
+            _previewImage.raycastTarget = false;
+            go.SetActive(false);
+
+            var caption = new GameObject("PreviewNote",
+                typeof(RectTransform), typeof(CanvasRenderer));
+            RectTransform crt = caption.GetComponent<RectTransform>();
+            crt.SetParent(go.transform, false);
+            crt.anchorMin = new Vector2(0f, 0f);
+            crt.anchorMax = new Vector2(1f, 0f);
+            crt.pivot = new Vector2(0.5f, 0f);
+            crt.anchoredPosition = new Vector2(0f, -18f);
+            crt.sizeDelta = new Vector2(0f, 18f);
+
+            _previewNote = caption.AddComponent<Text>();
+            _previewNote.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+            _previewNote.fontSize = 13;
+            _previewNote.color = new Color(0.55f, 0.35f, 0.35f, 1f);
+            _previewNote.alignment = TextAnchor.MiddleCenter;
+            _previewNote.raycastTarget = false;
+            caption.SetActive(false);
+        }
+
+        private void ClearPreview()
+        {
+            if (_previewTex != null)
+            {
+                Destroy(_previewTex);
+                _previewTex = null;
+            }
+            if (_previewImage != null)
+            {
+                _previewImage.texture = null;
+                _previewImage.rectTransform.sizeDelta = new Vector2(PreviewBoxSize, PreviewBoxSize);
+                _previewImage.gameObject.SetActive(false);
+            }
+            if (_previewNote != null)
+                _previewNote.gameObject.SetActive(false);
+        }
+
+        private void ShowPreview(string path)
+        {
+            if (_previewImage == null || IsTiff(path)) return;
+            SetPreviewTexture(LoadThumbnail(path));
+        }
+
+        private void SetPreviewTexture(Texture2D tex)
+        {
+            if (tex == null)
+            {
+                ClearPreview();
+                return;
+            }
+            if (_previewTex != null)
+            {
+                Destroy(_previewTex);
+                _previewTex = null;
+            }
+            _previewTex = tex;
+            if (_previewImage == null) return;
+            _previewNote?.gameObject.SetActive(false);
+            _previewImage.texture = tex;
+            _previewImage.rectTransform.sizeDelta = FitInto(tex.width, tex.height, PreviewBoxSize);
+            _previewImage.gameObject.SetActive(true);
+        }
+
+        private void ShowPreviewUnavailable()
+        {
+            if (_previewTex != null)
+            {
+                Destroy(_previewTex);
+                _previewTex = null;
+            }
+            if (_previewImage == null) return;
+            _previewImage.texture = null;
+            _previewImage.rectTransform.sizeDelta = new Vector2(PreviewBoxSize, PreviewBoxSize);
+            _previewImage.gameObject.SetActive(true);
+            if (_previewNote != null)
+            {
+                _previewNote.text = "Preview unavailable";
+                _previewNote.gameObject.SetActive(true);
+            }
+        }
+
+        /// <summary>
+        /// GeoTIFF can't be decoded client-side (Unity's ImageConversion is
+        /// PNG/JPG only), so its preview is rendered server-side once the
+        /// upload is ingested: GET /preview/{upload_id} returns a low-res PNG.
+        /// Purely visual; the upload/Process flow never depends on this.
+        /// </summary>
+        private IEnumerator ShowServerPreview(string uploadId)
+        {
+            yield return _launcher.Api.DownloadTexture("/preview/" + uploadId,
+                onSuccess: tex =>
+                {
+                    SetPreviewTexture(tex);
+                },
+                onError: err =>
+                {
+                    Debug.LogWarning($"[preview] server render failed for {uploadId}: {err}");
+                    ShowPreviewUnavailable();
+                });
+        }
+
+        private static bool IsTiff(string path)
+        {
+            string ext = Path.GetExtension(path);
+            return ext != null && (ext.Equals(".tif", StringComparison.OrdinalIgnoreCase)
+                                   || ext.Equals(".tiff", StringComparison.OrdinalIgnoreCase));
+        }
+
+        /// <summary>
+        /// Load PNG/JPG bytes into a Texture2D, downsampling anything larger
+        /// than MaxPreviewDim so a huge source never allocates a full-res
+        /// texture just for the thumbnail. Returns null for unsupported or
+        /// corrupt files (caller hides the preview; picker flow unaffected).
+        /// </summary>
+        private static Texture2D LoadThumbnail(string path)
+        {
+            byte[] bytes;
+            try
+            {
+                bytes = File.ReadAllBytes(path);
+            }
+            catch (IOException e)
+            {
+                Debug.LogWarning($"[preview] cannot read {path}: {e.Message}");
+                return null;
+            }
+
+            var full = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+            if (!ImageConversion.LoadImage(full, bytes))
+            {
+                Debug.LogWarning($"[preview] unreadable image format: {path}");
+                Destroy(full);
+                return null;
+            }
+
+            int maxDim = Mathf.Max(full.width, full.height);
+            if (maxDim <= MaxPreviewDim) return full;
+
+            int w = Mathf.RoundToInt((float)full.width * MaxPreviewDim / maxDim);
+            int h = Mathf.RoundToInt((float)full.height * MaxPreviewDim / maxDim);
+
+            var rt = RenderTexture.GetTemporary(w, h, 0);
+            var thumb = new Texture2D(w, h, TextureFormat.RGBA32, false);
+            try
+            {
+                RenderTexture.active = rt;
+                Graphics.Blit(full, rt);
+                thumb.ReadPixels(new Rect(0, 0, w, h), 0, 0);
+                thumb.Apply();
+            }
+            finally
+            {
+                RenderTexture.active = null;
+                RenderTexture.ReleaseTemporary(rt);
+                Destroy(full);
+            }
+            return thumb;
+        }
+
+        private static Vector2 FitInto(int w, int h, float box)
+        {
+            if (w <= 0 || h <= 0) return new Vector2(box, box);
+            float s = box / Mathf.Max(w, h);
+            return new Vector2(w * s, h * s);
+        }
+
+        #endregion
 
         #region Native file picker
 

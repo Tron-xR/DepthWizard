@@ -15,6 +15,12 @@ SIGN-INVERTED (calibration flipped the sign; the apparent "agreement" is not
 genuine). Per-tile failures (server 5xx, malformed geotiff/rgb) are logged and
 the batch continues.
 
+Verdicts are reported on TWO independent axes (B3):
+  - model polarity    (from the raw signed r): inverted / positive / no-signal
+  - calibration stability (raw vs calibrated sign): flipped / stable
+A RANSAC sign flip is a calibration artifact and must not masquerade as model
+inversion; the legacy single-axis flag is still printed for backward compat.
+
 Run (defaults target training_data/ when the server is up):
   uv run python tools/score_my_data.py --root training_data
   uv run python tools/score_my_data.py --img "geo_test_data/*_rgb.*" --dem "geo_test_data/*_dem.tif"
@@ -119,14 +125,14 @@ def main() -> int:
     pairs: list[tuple[str, Path, Path]] = []
     if args.root:
         root = Path(args.root)
-        rgb_globs = sorted(root.glob("*_rgb.*"))
+        rgb_globs = sorted(root.rglob("*_rgb.*"))
         for rgb in rgb_globs:
-            stem = str(rgb.name)
-            if not stem.endswith("_rgb."):
+            stem = rgb.stem
+            if not stem.endswith("_rgb"):
                 continue
-            dem = root / (stem[: -len("_rgb")] + "_dem.tif")
+            dem = rgb.parent / (stem[: -len("_rgb")] + "_dem.tif")
             if dem.exists():
-                pairs.append(("", rgb, dem))
+                pairs.append((str(rgb.parent.relative_to(root)), rgb, dem))
     else:
         if not (args.img and args.dem):
             print("Provide --root, or both --img and --dem globs.", file=sys.stderr)
@@ -154,7 +160,8 @@ def main() -> int:
         print(f"\n[{idx}/{len(pairs)}] {label}")
         row = {"tile": label, "raw_corr": None, "cal_corr": None,
                "rmse": None, "mae": None, "held_out": None,
-               "flag": "ok", "note": None}
+               "flag": "ok", "note": None,
+               "polarity": None, "stability": None}
         try:
             raw = _evaluate(base, rgb, dem, "relative", args.timeout)
             cal = _evaluate(base, rgb, dem, "calibrated", args.timeout)
@@ -184,13 +191,34 @@ def main() -> int:
             elif raw_c < 0.2:
                 row["flag"] = "weak-raw"
                 row["note"] = f"raw correlation {raw_c:+.3f} < 0.2"
+
+        # Two-axis verdict (B3): model polarity from the raw signed r, and
+        # calibration stability (did calibration flip the sign?). "flipped"
+        # needs a meaningful raw signal (|raw| > 0.05); a missing calibrated
+        # correlation is "n/a", never flipped.
+        if raw_c is None:
+            row["polarity"] = "n/a"
+        elif raw_c < RAW_NEG_THRESHOLD:
+            row["polarity"] = "inverted"
+        elif raw_c > CAL_POS_THRESHOLD:
+            row["polarity"] = "positive"
+        else:
+            row["polarity"] = "no-signal"
+        if raw_c is None or cal_c is None:
+            row["stability"] = "n/a"
+        elif abs(raw_c) <= 0.05:
+            row["stability"] = "stable"
+        elif (raw_c > 0.0) != (cal_c > 0.0):
+            row["stability"] = "flipped"
+        else:
+            row["stability"] = "stable"
         rows.append(row)
 
     print()
-    print("=" * 112)
+    print("=" * 128)
     print(f"{'tile':<24}{'raw_corr':>10}{'cal_corr':>10}{'rmse':>10}{'mae':>10}"
-          f"{'held_out':>12}   flag")
-    print("-" * 112)
+          f"{'held_out':>12}   {'flag':<13}{'polarity':>10}{'stability':>10}")
+    print("-" * 128)
     for r in rows:
         raw = f"{r['raw_corr']:+.3f}" if r["raw_corr"] is not None else "  n/a"
         cal = f"{r['cal_corr']:+.3f}" if r["cal_corr"] is not None else "  n/a"
@@ -201,7 +229,11 @@ def main() -> int:
             rmse = "n/a"
             mae = "n/a"
         held = str(r["held_out"]) if r["held_out"] is not None else "n/a"
-        print(f"{r['tile']:<24}{raw:>10}{cal:>10}{rmse:>10}{mae:>10}{held:>12}   {r['flag']}")
+        flag = r["flag"] or "ok"
+        pol = r["polarity"] or "n/a"
+        stab = r["stability"] or "n/a"
+        print(f"{r['tile']:<24}{raw:>10}{cal:>10}{rmse:>10}{mae:>10}{held:>12}   "
+              f"{flag:<13}{pol:>10}{stab:>10}")
         if r.get("note"):
             print(f"    ({r['note']})")
 
@@ -221,6 +253,37 @@ def main() -> int:
     print(f"  SIGN-INVERTED tiles     : {len(sig)}")
     for s in sig:
         print(f"      {s['tile']}: raw {s['raw_corr']:+.3f} -> cal {s['cal_corr']:+.3f} (NOT genuine agreement)")
+    print("=" * 112)
+
+    # Cross-tab of the two axes (B3): rows = model polarity from the raw signed
+    # r; columns = calibration stability (did calibration flip the sign?).
+    _pol_order = ["inverted", "positive", "no-signal", "n/a"]
+    _stab_order = ["flipped", "stable", "n/a"]
+    xt = {(p, s): 0 for p in _pol_order for s in _stab_order}
+    for r in rows:
+        xt[(r["polarity"], r["stability"])] += 1
+    print()
+    print("CROSS-TAB: model polarity x calibration stability")
+    print("".join(f"{s:>13}" for s in _stab_order))
+    print("-" * 62)
+    for p in _pol_order:
+        cells = "".join(f"{xt[(p, s)]:>13}" for s in _stab_order)
+        print(f"{p:>13}{cells}")
+    print("-" * 62)
+    pos_flip = xt[("positive", "flipped")]
+    neg_flip = xt[("inverted", "flipped")]
+    print(f"  raw>0 & cal<0  ({pos_flip} tiles): calibration artifact - a negative "
+          f"calibrated correlation after a positive raw (expected EMPTY after B1 "
+          f"sign-stability fix)")
+    print(f"  raw<0 & cal>0  ({neg_flip} tiles): expected flip for an inverted "
+          f"model - calibration honestly re-inverts it; the calibrated positive "
+          f"r is not genuine agreement")
+    annotated_flip = [r for r in rows if r["stability"] == "flipped"]
+    if annotated_flip:
+        print("  flipped tiles:")
+        for f_ in annotated_flip:
+            print(f"      {f_['tile']}: polarity={f_['polarity']:>9} raw {f_['raw_corr']:+.3f} "
+                  f"-> cal {f_['cal_corr']:+.3f}")
     print("=" * 112)
     return 0
 

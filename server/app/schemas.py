@@ -64,6 +64,15 @@ class ValidationResponse(BaseModel):
     calibration_warning: Optional[str] = None
     calibration_scale: Optional[float] = None
     calibration_offset: Optional[float] = None
+    # Model polarity on the held-out 20% (raw relative depth vs reference,
+    # UNcalibrated): the signed correlation before any calibration flip.
+    raw_correlation_signed: Optional[float] = None
+    # Sign of the fitted calibration scale ("+" / "-"; None when no fit ran).
+    scale_sign: Optional[str] = None
+    # Model polarity relative to the reference, on the calibration TRAIN split.
+    # True = clearly inverted (raw corr < -0.25); False = agrees; None = undefined.
+    polarity_inverted: Optional[bool] = None
+    polarity_reason: Optional[str] = None
 
 
 class EvaluationResponse(BaseModel):
@@ -87,6 +96,11 @@ class EvaluationResponse(BaseModel):
     calibration_warning: Optional[str] = None
     calibration_scale: Optional[float] = None
     calibration_offset: Optional[float] = None
+    # Model polarity / raw signed correlation (same semantics as ValidationResponse).
+    raw_correlation_signed: Optional[float] = None
+    scale_sign: Optional[str] = None
+    polarity_inverted: Optional[bool] = None
+    polarity_reason: Optional[str] = None
 
 
 class HealthResponse(BaseModel):
