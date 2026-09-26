@@ -20,41 +20,12 @@ interactive 3D mesh in Unity.
 
 ## Demo
 
-A rotating view of a reconstructed, georeferenced terrain model.
+Upload a satellite or aerial photo, click **Process**, and watch the server reconstruct a
+real-world-scaled terrain mesh you can fly around in the Unity client.
 
-<p align="center">
-  <img src="Samples/georeferenced.gif" width="1000" alt="Rotating 3D terrain model">
-</p>
-
-<p align="center">
-  <strong>Interactive 3D Terrain Reconstruction</strong><br>
-  Generated terrain mesh visualized with elevation-based geometry and satellite imagery.
-</p>
-
-[▶ View full-resolution demo video](Samples/georeferenced.mp4)
-
-### Output Examples
-
-<table>
-<tr>
-<td align="center" width="50%">
-  <img src="Samples/georeferenced.png" width="100%" alt="Georeferenced terrain">
-</td>
-<td align="center" width="50%">
-  <img src="Samples/non%20georeferenced.png" width="100%" alt="Relative (non-georeferenced) terrain">
-</td>
-</tr>
-<tr>
-<td align="center">
-  <strong>Georeferenced Terrain</strong><br>
-  Terrain generated with geographic positioning and elevation calibration.
-</td>
-<td align="center">
-  <strong>Relative Terrain</strong><br>
-  Terrain generated from imagery without geographic reference information.
-</td>
-</tr>
-</table>
+**Interactive 3D Terrain Reconstruction** — the generated terrain mesh is visualized with
+elevation-based geometry and satellite imagery. Demo media (animations and georeferenced /
+relative output examples) are attached to each [GitHub Release](https://github.com/Tron-xR/DepthWizard/releases).
 
 ---
 
@@ -233,7 +204,6 @@ DepthWizard/
 ├── decoder_training/            fine-tuned DA2 decoder training
 │   ├── train_decoder.py         training pipeline (frozen backbone + decoder head)
 │   └── eval_finetuned.py        held-out evaluation of the fine-tuned backend
-├── Samples/                     demo assets (GIF, screenshots, video)
 ├── sample_images/               test images + DEM ground truth (test_landscape_dem.npz)
 ├── gather_training.py           RGB + DEM training-pair gathering
 └── 01-problem.md … 17-*.md      design and research notes
