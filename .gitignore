@@ -16,6 +16,23 @@ unity-client/UserSettings/
 unity-client/build/
 unity-client/obj/
 
+# Unity editor debris
+unity-client/Assets/_Recovery/
+unity-client/Assets/Scripts/Mesh/*.bak-*
+unity-client/Assets/Scripts/Mesh/heal-*
+
+# Root screenshots / scratch build output
+/build/
+/screenshots/
+
+# Demo media & cached inference outputs (large, regenerable; kept out of repo)
+/Samples/
+/server/outputs/
+
+# Server scratch diagnostics
+/server/_eval_*.json
+/server/scored_training_*.txt
+
 # Frozen server inside client StreamingAssets (too large + long paths)
 unity-client/Assets/StreamingAssets/
 

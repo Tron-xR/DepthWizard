@@ -171,6 +171,60 @@ def test_dem_view_relative(client):
     # ramp spans the job's own [0, 200] m range exactly -> full 0..255 stretch
     assert hist[0] > 0 and hist[255] > 0
 
+    # relative jobs have no CRS or real elevation -> export must refuse clearly
+    resp = client.get(f"/export-dsm/{job['id']}")
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["error"] == "dsm_export_requires_georeferenced"
+
+
+def test_export_dsm_absolute(client, monkeypatch, tmp_path):
+    """The georeferenced export must equal the mesh heightmap array (true
+    meters, bitwise-identical to the pipeline dsm.tif - no exaggeration) and
+    carry the original upload's CRS/transform + model-estimated tags."""
+    from rasterio.transform import from_origin
+
+    from app import db, jobs
+
+    # local reference DEM so no network is needed (matches geo_environment in
+    # test_absolute_branch: true elevation 150 + 0.7xx + 0.3yy over 40x40)
+    yy, xx = np.mgrid[0:40, 0:40].astype("float32")
+    true_elev = 150.0 + 0.7 * xx + 0.3 * yy
+    ref_path = tmp_path / "ref_dem.tif"
+    write_geotiff(ref_path, true_elev, minx=500000.0, maxy=4650000.0, cell=30.0)
+    monkeypatch.setenv("DEPTHWIZARD_DEM_FILE", str(ref_path))
+
+    # georeferenced upload through the API
+    src = tmp_path / "src.tif"
+    write_geotiff(src, np.arange(1600, dtype="float32").reshape(40, 40) + 500.0)
+    with open(src, "rb") as f:
+        up = client.post("/upload", files={"file": ("src.tif", f.read(), "image/tiff")}).json()
+    assert up["is_georeferenced"] is True
+
+    job = db.create_job(up["upload_id"], "absolute_dsm")
+    jobs._run_job(job["id"])
+    assert db.get_job(job["id"])["status"] == "done"
+
+    resp = client.get(f"/export-dsm/{job['id']}")
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"] == "image/tiff"
+
+    out = tmp_path / "exported.tif"
+    out.write_bytes(resp.content)
+    import rasterio
+
+    internal = db.get_result_by_job(job["id"])["dsm_geotiff_path"]
+    with rasterio.open(internal) as src_ds, rasterio.open(out) as exp_ds:
+        # same georeference as the original upload footprint
+        assert exp_ds.crs.to_string() == "EPSG:32633"
+        assert exp_ds.transform == from_origin(500000.0, 4650000.0, 30.0, 30.0)
+        # byte parity with the mesh's true-scale elevation (no exaggeration)
+        assert np.array_equal(exp_ds.read(1).tobytes(), src_ds.read(1).tobytes())
+        tags = exp_ds.tags()
+        assert "model-estimated" in tags["SOURCE"].lower()
+        assert tags["VERTICAL_EXAGGERATION"] == "none"
+        assert tags["BACKEND"]
+        assert tags["JOB_ID"] == job["id"]
+
 
 def test_dem_view_png_uses_float_dsm(tmp_path):
     # georeferenced archive path: renders from the full-precision float32 DSM

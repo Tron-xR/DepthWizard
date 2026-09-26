@@ -207,6 +207,23 @@ namespace DepthWizard.Core
             }
         }
 
+        public IEnumerator ExportDsm(string jobId, Action<byte[]> onSuccess, Action<string> onError)
+        {
+            using (UnityWebRequest req = UnityWebRequest.Get($"{_baseUrl}/export-dsm/{jobId}"))
+            {
+                req.timeout = 60;
+                yield return req.SendWebRequest();
+
+                if (req.result != UnityWebRequest.Result.Success)
+                {
+                    onError?.Invoke(ParseErrorMessage(req.downloadHandler?.text) ?? req.error);
+                    yield break;
+                }
+
+                onSuccess?.Invoke(req.downloadHandler.data);
+            }
+        }
+
         // True when body contains '"name": <non-null>' for the given JSON field.
         private static bool HasNonNullField(string body, string name)
         {

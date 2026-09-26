@@ -94,6 +94,39 @@ def export_geotiff(elevation: np.ndarray, crs: str, transform, bounds, path: Pat
         dst.write(elevation.astype("float32"), 1)
 
 
+def export_dsm_geotiff(source_tif: Path, out_path: Path, *, job_id: str,
+                       input_filename: str, backend: str, model: str,
+                       min_elev: Optional[float], max_elev: Optional[float]) -> str:
+    """Write a downloadable, traceability-tagged copy of a job's real DSM.
+
+    Re-uses the pipeline-written float32 GeoTIFF (its CRS/transform come from
+    the original upload meta in jobs._calibrate_absolute), so pixel values stay
+    byte-identical to the mesh's true-scale heights; the copy only adds deflate
+    + GDAL metadata tags naming this as a MODEL-ESTIMATED surface (no vertical
+    exaggeration). Returns the output path.
+    """
+    import rasterio
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with rasterio.open(source_tif) as src:
+        data = src.read(1)
+        profile = src.profile.copy()
+    profile.update(compress="deflate", nodata=None)
+    with rasterio.open(out_path, "w", **profile) as dst:
+        dst.write(data, 1)
+        dst.update_tags(
+            SOURCE="DepthWizard model-estimated DSM (NOT ground truth)",
+            MODEL=model,
+            BACKEND=backend,
+            JOB_ID=job_id,
+            INPUT=Path(input_filename).name,
+            VERTICAL_EXAGGERATION="none",
+            MIN_ELEVATION_M=f"{min_elev:.6g}" if min_elev is not None else "",
+            MAX_ELEVATION_M=f"{max_elev:.6g}" if max_elev is not None else "",
+        )
+    return str(out_path)
+
+
 def compute_world_dimensions(height: int, width: int,
                              cell_size: Optional[float],
                              bounds: Optional[list] = None,

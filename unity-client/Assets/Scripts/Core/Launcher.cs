@@ -34,6 +34,13 @@ namespace DepthWizard.Core
 
         private void Awake()
         {
+            UnityEngine.Camera cam = UnityEngine.Camera.main;
+            if (cam != null)
+            {
+                cam.clearFlags = CameraClearFlags.SolidColor;
+                cam.backgroundColor = Color.black;
+            }
+
             if (_api == null)
                 _api = new DepthWizardApi();
 

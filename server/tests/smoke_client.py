@@ -1,11 +1,15 @@
 """E2E smoke test against a running DepthWizard server."""
+import os
 import sys
+import tempfile
 import time
 
 import httpx
 
 BASE = "http://127.0.0.1:8000"
-IMG = r"smoke.png"
+IMG = os.environ.get(
+    "SMOKE_TEST_IMG", os.path.join(tempfile.gettempdir(), "depthwizard_smoke.png")
+)
 
 
 def main():
@@ -39,7 +43,7 @@ def main():
         # fetch heightmap bytes
         hm = c.get(BASE + res["heightmap_url"])
         print("heightmap fetch:", hm.status_code, "bytes:", len(hm.content))
-        with open(r"out_heightmap.png", "wb") as f:
+        with open(os.path.join(tempfile.gettempdir(), "depthwizard_out_heightmap.png"), "wb") as f:
             f.write(hm.content)
     else:
         print("JOB FAILED")

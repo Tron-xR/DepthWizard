@@ -152,6 +152,45 @@ def dem_view(job_id: str) -> Response:
     return Response(content=png, media_type="image/png")
 
 
+@router.get("/export-dsm/{job_id}")
+def export_dsm(job_id: str) -> FileResponse:
+    """Downloadable GeoTIFF of a job's real DSM (absolute/georeferenced branch).
+
+    The same true-scale elevation array the Unity mesh and /dem-view consume
+    (no vertical exaggeration), float32 meters with the original upload's
+    CRS/transform, plus metadata tagging it as a model-estimated surface.
+    Relative (non-georeferenced) jobs have no CRS or real scale, so they get a
+    clear 4xx instead of a misleading raster.
+    """
+    job = db.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=ErrorResponse(error="not_found", message="Job not found").model_dump())
+    if job["status"] != "done":
+        raise HTTPException(status_code=409, detail=ErrorResponse(error="not_ready", message="Job is not done").model_dump())
+    res = db.get_result_by_job(job_id)
+    if res is None:
+        raise HTTPException(status_code=404, detail=ErrorResponse(error="not_found", message="Result not found").model_dump())
+    if not res.get("dsm_geotiff_path"):
+        raise HTTPException(status_code=400, detail=ErrorResponse(
+            error="dsm_export_requires_georeferenced",
+            message="DSM export needs a georeferenced input (GPS/EXIF tags); this was a relative-only run with no CRS or real elevation.").model_dump())
+    try:
+        upload = db.get_upload(job["upload_id"])
+        out = exporter.export_dsm_geotiff(
+            Path(res["dsm_geotiff_path"]),
+            Path(config.FILES_DIR) / job_id / "dsm_export.tif",
+            job_id=job_id,
+            input_filename=upload["original_filename"] or "upload",
+            backend=depth.backend_slug(),
+            model=depth.model_identifier(),
+            min_elev=res.get("min_elev"),
+            max_elev=res.get("max_elev"),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=ErrorResponse(error="dsm_export_failed", message=f"DSM export failed: {e}").model_dump())
+    return FileResponse(out, media_type="image/tiff", filename="dsm_export.tif")
+
+
 @router.get("/validate/{job_id}", response_model=ValidationResponse)
 def validate(job_id: str, save_artifacts: bool = False) -> ValidationResponse:
     """Validate a processed job's absolute DSM against the reference DEM.

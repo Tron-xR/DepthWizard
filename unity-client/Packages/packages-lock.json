@@ -99,6 +99,12 @@
         "com.unity.searcher": "4.9.3"
       }
     },
+    "com.unity.standalonefilebrowser": {
+      "version": "file:com.unity.standalonefilebrowser",
+      "depth": 0,
+      "source": "embedded",
+      "dependencies": {}
+    },
     "com.unity.test-framework": {
       "version": "1.6.0",
       "depth": 3,
