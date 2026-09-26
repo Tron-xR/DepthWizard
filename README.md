@@ -31,8 +31,6 @@ A rotating view of a reconstructed, georeferenced terrain model.
   Generated terrain mesh visualized with elevation-based geometry and satellite imagery.
 </p>
 
-[Watch full-resolution demo](Samples/georeferenced.mp4)
-
 ---
 
 ## Output Examples
