@@ -121,6 +121,14 @@ packaged single-folder Windows build of the server is documented in
 
 ## Quick Start
 
+> **Just want to run it?** Download the full standalone Windows build (~6.5 GB, player
+> and bundled server included — no Python or separate server setup needed):
+>
+> **<https://tron-x.itch.io/depthwizard>**
+>
+> Everything below is the alternative **from-source** path for building DepthWizard
+> yourself from this repository.
+
 1. **Clone the repository**
 
    ```bash
