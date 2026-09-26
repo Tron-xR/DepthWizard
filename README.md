@@ -31,30 +31,23 @@ A rotating view of a reconstructed, georeferenced terrain model.
   Generated terrain mesh visualized with elevation-based geometry and satellite imagery.
 </p>
 
-[▶ View full-resolution demo video](Samples/georeferenced.mp4)
+[Watch full-resolution demo](Samples/georeferenced.mp4)
 
-### Output Examples
+---
 
-<table>
-<tr>
-<td align="center" width="50%">
-  <img src="Samples/georeferenced.png" width="100%" alt="Georeferenced terrain">
-</td>
-<td align="center" width="50%">
-  <img src="Samples/non%20georeferenced.png" width="100%" alt="Relative (non-georeferenced) terrain">
-</td>
-</tr>
-<tr>
-<td align="center">
-  <strong>Georeferenced Terrain</strong><br>
-  Terrain generated with geographic positioning and elevation calibration.
-</td>
-<td align="center">
-  <strong>Relative Terrain</strong><br>
-  Terrain generated from imagery without geographic reference information.
-</td>
-</tr>
-</table>
+## Output Examples
+
+<p align="center">
+  <img src="Samples/georeferenced.png" width="800" alt="Georeferenced terrain output">
+</p>
+
+**Georeferenced Terrain** — terrain generated with geographic positioning and elevation calibration.
+
+<p align="center">
+  <img src="Samples/non%20georeferenced.png" width="800" alt="Relative (non-georeferenced) terrain output">
+</p>
+
+**Relative Terrain** — terrain generated from imagery without geographic reference information.
 
 ---
 
