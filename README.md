@@ -13,6 +13,7 @@ interactive 3D mesh in Unity.
 [![Unity 6](https://img.shields.io/badge/Unity-6000.3.11f1-000000?logo=unity&logoColor=white)](unity-client/ProjectSettings/ProjectVersion.txt)
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)](server/app/main.py)
 [![PyTorch 2.5](https://img.shields.io/badge/PyTorch-2.5-EE4C2C?logo=pytorch&logoColor=white)](server/pyproject.toml)
+[![Available on itch.io](https://img.shields.io/badge/itch.io-play-fa5c5c?logo=itch.io&logoColor=white)](https://tron-x.itch.io/depthwizard)
 
 </div>
 
