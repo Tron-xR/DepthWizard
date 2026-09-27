@@ -45,10 +45,15 @@ public class MinimalButtonHover : MonoBehaviour, IPointerEnterHandler, IPointerE
     public Color restText = new Color(0.231f, 0.510f, 0.965f); // #3b82f6
     public Color hoverText = Color.white;
     [Range(0f, 1f)] public float glowAlpha = 0.37f;            // ~ #3b83f65f alpha
+    public Color disabledBg = new Color(0.15f, 0.15f, 0.17f);  // muted dark gray
+    public Color disabledText = new Color(0.4f, 0.4f, 0.45f);  // dimmed gray text
+    public float disabledAlpha = 0f;                           // no glow when disabled
 
     [Header("Timing")]
     public float duration = 0.3f; // matches CSS "transition: 0.3s"
 
+    Button _button;
+    bool _wasInteractable = true;
     Coroutine _running;
 
     void Reset()
@@ -56,8 +61,70 @@ public class MinimalButtonHover : MonoBehaviour, IPointerEnterHandler, IPointerE
         background = GetComponent<Image>();
     }
 
-    public void OnPointerEnter(PointerEventData eventData) => Animate(true);
-    public void OnPointerExit(PointerEventData eventData) => Animate(false);
+    void Awake()
+    {
+        _button = GetComponent<Button>();
+        _wasInteractable = _button != null && _button.interactable;
+    }
+
+    void OnEnable()
+    {
+        // Snap instantly on (re)activation so a disabled button never shows as active.
+        if (_button != null) ApplyState(_button.interactable);
+    }
+
+    void Update()
+    {
+        if (_button == null) return;
+        if (_button.interactable != _wasInteractable)
+        {
+            _wasInteractable = _button.interactable;
+            ApplyState(_wasInteractable); // snap, no tween, on either transition
+        }
+    }
+
+    /// <summary>No hover visuals while the button cannot be pressed.</summary>
+    public void OnPointerEnter(PointerEventData eventData)
+    {
+        if (_button != null && !_button.interactable) return;
+        Animate(true);
+    }
+
+    /// <summary>No hover visuals while the button cannot be pressed.</summary>
+    public void OnPointerExit(PointerEventData eventData)
+    {
+        if (_button != null && !_button.interactable) return;
+        Animate(false);
+    }
+
+    void ApplyState(bool interactable)
+    {
+        if (_running != null) { StopCoroutine(_running); _running = null; }
+
+        if (!interactable)
+        {
+            if (background != null) background.color = disabledBg;
+            if (label != null) label.color = disabledText;
+            if (glow != null)
+            {
+                Color c = glow.color;
+                c.a = disabledAlpha;
+                glow.color = c;
+            }
+        }
+        else
+        {
+            // Return to the clean rest state, not whatever stale hover style was active.
+            if (background != null) background.color = restBg;
+            if (label != null) label.color = restText;
+            if (glow != null)
+            {
+                Color c = glow.color;
+                c.a = 0f;
+                glow.color = c;
+            }
+        }
+    }
 
     void Animate(bool hovering)
     {
