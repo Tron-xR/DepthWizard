@@ -150,7 +150,7 @@ After inference, the rDSM is either:
 
 ### 5.6 DEM/Reference Handling
 
-For the absolute branch, `server/app/pipeline/dem_source.py` fetches a reference DEM covering the upload's bounds. Primary source: OpenTopography (SRTM 30m). Fallback: Copernicus GLO-30 via AWS Open Data. Results are cached on disk keyed by (source, bounds, CRS). A local override via `DEPTHWIZARD_DEM_FILE` bypasses the network.
+For the absolute branch, `server/app/pipeline/dem_source.py` fetches a reference DEM covering the upload's bounds. Primary source: OpenTopography (SRTM 30m). Fallback: Copernicus GLO-30 via AWS Open Data. Results are cached on disk keyed by (source, bounds, CRS). A local override via `DEPTHWIZARD_DEM_FILE` bypasses the network. Copernicus GLO-30 stays a validation-only reference: the calibration step uses `fetch_calibration_reference_dem()`, which honors a dedicated `DEPTHWIZARD_CALIBRATION_DEM_FILE` when set (an independent elevation product for calibration without contaminating the validation reference).
 
 **Source:** `server/app/pipeline/dem_source.py:67-110`, `server/app/pipeline/dem_source.py:112-164`
 
@@ -205,6 +205,7 @@ The Unity client (`ServerManager.cs`) starts the FastAPI server, then the viewer
 | `dsm.tif` | Float32 GeoTIFF | Metric (meters) | Yes | Absolute |
 | `dsm_export.tif` | Float32 GeoTIFF (deflate) | Metric (meters) | Yes | Absolute |
 | `diff_heatmap.png` | 8-bit RGB PNG | N/A | No | After `/validate` |
+| `scatter.png` | 8-bit RGB PNG (reference vs prediction density + identity line) | N/A | No | After `/validate` |
 | `comparison.png` | 8-bit RGB PNG | N/A | No | After `/evaluate` |
 | `predicted_depth.npy` | NumPy float32 | Calibrated or relative | Depends | After `save_artifacts` |
 | `metrics.json` | JSON | N/A | N/A | After `save_artifacts` |
@@ -368,6 +369,8 @@ RANSAC rejects outliers (buildings, vegetation, clouds). If RANSAC and OLS disag
 
 ### 10.4 Calibration Warnings
 
+Warnings are informational (the fit stays numerically valid). Independent hazards on the same fit **accumulate**: multiple warning kinds are joined with `"; "` instead of a single priority winner, so a fit with several real problems surfaces every one.
+
 | Warning | Trigger | Behavior |
 |---------|---------|----------|
 | `negative_scale` | Fitted scale < 0 | Scale reported unchanged, never flipped |
@@ -375,8 +378,9 @@ RANSAC rejects outliers (buildings, vegetation, clouds). If RANSAC and OLS disag
 | `near_zero_scale` | Predicted span < 2% of reference terrain range | Returns constant elevation (flat result) |
 | `insufficient_variance` | RANSAC fails on degenerate training data | Returns constant fit |
 | `ransac_sign_disagreement` | RANSAC and OLS signs differ | OLS sign used, warning flagged |
+| `scale_too_large` | Predicted span > 2x reference terrain range | Magnitude is an amplification artifact, report but do not trust literally |
 
-**Source:** `server/app/pipeline/calibration.py:43-48`, `server/app/pipeline/calibration.py:227-260`
+**Source:** `server/app/pipeline/calibration.py:~40-58`, `server/app/pipeline/calibration.py:238-264`
 
 ### 10.5 Negative-Scale Handling
 
@@ -772,7 +776,7 @@ graph TD
 ### 16.9 GET /validate/{job_id}
 
 - **Query param:** `save_artifacts` (bool, default false)
-- **Response:** `ValidationResponse` (`reference_source`, `rmse`, `mae`, `correlation`, `correlation_reason`, `degenerate_calibration`, `calibration_status`, `calibration_warning`, `calibration_scale`, `calibration_offset`, `raw_correlation_signed`, `scale_sign`, `polarity_inverted`, `polarity_reason`, `diff_heatmap_url`, `held_out_pixel_count`)
+- **Response:** `ValidationResponse` (`reference_source`, `rmse`, `mae`, `correlation`, `correlation_reason`, `degenerate_calibration`, `calibration_status`, `calibration_warning`, `calibration_scale`, `calibration_offset`, `raw_correlation_signed`, `scale_sign`, `polarity_inverted`, `polarity_reason`, `diff_heatmap_url`, `scatter_url`, `backend`, `held_out_pixel_count`)
 - **Source:** `server/app/routes.py:194-211`
 
 ### 16.10 POST /evaluate

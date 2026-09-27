@@ -95,3 +95,38 @@ def render_diff_heatmap(predicted: np.ndarray, reference: np.ndarray, path: Path
     rgb = np.clip(rgb, 0, 1)
     img = Image.fromarray((rgb * 255).astype("uint8"), "RGB")
     img.save(path, "PNG")
+
+
+def render_scatter(predicted: np.ndarray, reference: np.ndarray, path: Path,
+                   size: int = 512) -> None:
+    """Reference(x) vs prediction(y) 2D density tile with a red identity line.
+
+    PIL-only (matplotlib is not a server dependency); density is log-scaled so a
+    tight point cloud doesn't wash out the identity-check signal. A prediction
+    hugging the diagonal = scale ~1, zero bias vs the reference.
+    """
+    from PIL import Image, ImageDraw
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    p = np.asarray(predicted, dtype="float64").ravel()
+    r = np.asarray(reference, dtype="float64").ravel()
+    keep = np.isfinite(p) & np.isfinite(r)
+    p, r = p[keep], r[keep]
+    if p.size < 2:
+        raise ValueError("Not enough valid pixels to scatter")
+    lo = float(min(p.min(), r.min()))
+    hi = float(max(p.max(), r.max()))
+    if hi - lo < 1e-9:
+        hi = lo + 1.0
+    n = 256
+    ri = np.clip(((r - lo) / (hi - lo) * (n - 1)).round().astype("int64"), 0, n - 1)
+    pi = np.clip(((p - lo) / (hi - lo) * (n - 1)).round().astype("int64"), 0, n - 1)
+    counts = np.zeros((n, n), dtype="int64")
+    np.add.at(counts, (pi, ri), 1)
+    dens = np.log1p(counts.astype("float64"))
+    dens /= dens.max() if dens.max() > 0 else 1.0
+    img = Image.fromarray((dens * 255).astype("uint8"), "L").convert("RGB")
+    img = img.resize((size, size), Image.NEAREST)
+    draw = ImageDraw.Draw(img)
+    draw.line((0, 0, size - 1, size - 1), fill=(255, 90, 90), width=3)
+    img.save(path, "PNG")

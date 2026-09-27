@@ -17,12 +17,17 @@ _IMELE_CKPT = Path(__file__).resolve().parents[2] / "models" / "imele_model.tar"
 
 
 def test_tf_backend_configured_but_broken_never_falls_back_to_hf(monkeypatch):
+    # The finetuned decoder is auto-discovered when its checkpoint exists, so it
+    # outranks TF/IMELE in dispatch; clear it to exercise the TF path in isolation.
+    monkeypatch.setattr(config, "FINETUNED_MODEL_PATH", "")
+    monkeypatch.setattr(config, "IMELE_MODEL_PATH", "")
     monkeypatch.setattr(config, "TF_MODEL_PATH", "C:/nope/saved")
     with pytest.raises(Exception):
         depth._load_model()
 
 
 def test_imele_backend_configured_but_broken_raises(monkeypatch):
+    monkeypatch.setattr(config, "FINETUNED_MODEL_PATH", "")
     monkeypatch.setattr(config, "IMELE_MODEL_PATH", "C:/nope/imele.tar")
     with pytest.raises(Exception):
         depth._load_model()

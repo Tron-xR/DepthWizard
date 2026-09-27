@@ -156,3 +156,9 @@ def test_validation_scores_held_out_not_all_pixels(geo_environment, monkeypatch)
     assert data["mae"] == pytest.approx(expected["mae"], rel=1e-6)
     assert data["correlation"] == pytest.approx(expected["correlation"])
     assert data["held_out_pixel_count"] < fit.n_samples  # never the full grid
+    # Additive summary stats on the SAME held-out pixels as the metrics above
+    # (client displays them as Bias / Prediction std / Reference std).
+    held_pred = fit.scale * fit.held_relative + fit.offset
+    assert data["bias"] == pytest.approx(float(np.mean(held_pred - fit.held_reference)))
+    assert data["prediction_std"] == pytest.approx(float(np.std(held_pred)))
+    assert data["reference_std"] == pytest.approx(float(np.std(fit.held_reference)))

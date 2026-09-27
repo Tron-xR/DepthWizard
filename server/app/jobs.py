@@ -169,7 +169,7 @@ def _calibrate_absolute(rdsm: np.ndarray, upload: dict, meta: dict, result_dir: 
     if not bounds or not crs:
         raise ValueError("Georeferenced upload is missing bounds/CRS")
 
-    ref, _ = dem_source.fetch_reference_dem(bounds, crs)
+    ref, _ = dem_source.fetch_calibration_reference_dem(bounds, crs)
     if ref.shape[:2] != rdsm.shape:
         ref = calib.resample_to_grid(ref, rdsm.shape)
 
@@ -236,10 +236,20 @@ def run_validation(job_id: str, *, save_artifacts: bool = False) -> dict:
         held_pred = fit.scale * fit.held_relative + fit.offset
         held_truth = fit.held_reference
         metrics = vmod.compute_metrics(held_pred, held_truth)
+        scored_pred, scored_truth = held_pred, held_truth
         held_out_count = int(metrics["n"])
     else:
         metrics = vmod.compute_metrics(pred, ref)
+        scored_pred, scored_truth = pred, ref
         held_out_count = None
+
+    # Additive summary stats on the SAME scored pixels as rmse/mae/correlation
+    # (held-out 20%, or whole grid for legacy jobs), in meters. bias is
+    # mean(predicted - reference), positive = model overpredicts, matching the
+    # p - r diff sign compute_metrics uses.
+    bias = float(np.mean(scored_pred - scored_truth))
+    prediction_std = float(np.std(scored_pred))
+    reference_std = float(np.std(scored_truth))
 
     # Uncalibrated model polarity: raw relative depth vs reference correlation on
     # the SAME held-out 20% (or whole grid for legacy jobs without a persisted
@@ -302,6 +312,11 @@ def run_validation(job_id: str, *, save_artifacts: bool = False) -> dict:
 
     heat_path = Path(result["heightmap_path"]).parent / "diff_heatmap.png"
     vmod.render_diff_heatmap(pred, ref, heat_path)
+    # Scatter on the SAME scored pixels as rmse/mae/correlation (held-out 20%,
+    # or the whole grid for legacy jobs) so it is provably consistent with the
+    # reported numbers, mirroring the heatmap's input set.
+    scatter_path = Path(result["heightmap_path"]).parent / "scatter.png"
+    vmod.render_scatter(scored_pred, scored_truth, scatter_path)
 
     # Record the source actually used (OpenTopography/Copernicus/local), not a
     # hardcoded label. No landscape classifier exists in this codebase, so
@@ -324,6 +339,8 @@ def run_validation(job_id: str, *, save_artifacts: bool = False) -> dict:
         "correlation": metrics["correlation"],
         "correlation_reason": correlation_reason,
         "diff_heatmap_url": f"/files/{job_id}/diff_heatmap.png",
+        "scatter_url": f"/files/{job_id}/scatter.png",
+        "backend": depth.backend_slug(),
         "held_out_pixel_count": held_out_count,
         "degenerate_calibration": degenerate_calibration,
         "calibration_reason": calib.degenerate_reason(fit) if degenerate_calibration else None,
@@ -331,6 +348,9 @@ def run_validation(job_id: str, *, save_artifacts: bool = False) -> dict:
         "calibration_warning": calib_warning,
         "calibration_scale": calib_scale,
         "calibration_offset": (fit.offset if fit is not None else None),
+        "bias": bias,
+        "prediction_std": prediction_std,
+        "reference_std": reference_std,
         "raw_correlation_signed": raw_corr_signed,
         "scale_sign": scale_sign,
         "polarity_inverted": polarity_inverted,

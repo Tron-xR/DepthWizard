@@ -147,7 +147,10 @@ def test_ransac_sign_flip_falls_back_to_ols_scale():
                  3000.0 * d + 1000.0 + rng.normal(0, 2.0, n))
     fit = calib.fit_affine(d.reshape(64, 64), h.reshape(64, 64))
     assert fit.scale > 0.0
-    assert fit.calibration_warning == "ransac_sign_disagreement"
+    # warnings accumulate (single field, "; "-joined): the fixture is ALSO a
+    # near-constant model output (raw std << reference std), so both hazards
+    # are surfaced rather than the sign-disagreement shadowing the other
+    assert fit.calibration_warning == "ransac_sign_disagreement; prediction_near_constant"
     assert fit.polarity_inverted is False
 
 
@@ -160,6 +163,33 @@ def test_genuinely_inverted_keeps_negative_scale_and_flags_polarity():
     h = -200.0 * d + 400.0 + rng.normal(0, 20.0, d.shape)
     fit = calib.fit_affine(d, h)
     assert fit.scale < 0.0
-    assert fit.calibration_warning == "negative_scale"
+    # same accumulate semantics as the flip test: raw d (std 0.29) vs h (relief
+    # ~400) makes the fixture near-constant too, surfaced alongside the sign warn
+    assert fit.calibration_warning == "negative_scale; prediction_near_constant"
     assert fit.polarity_inverted is True
     assert "inverted relative to the reference" in fit.polarity_reason
+
+
+def test_fit_affine_flags_absurd_magnitude_scale():
+    """Symmetric opposite of the near-zero guard (job 8b1b017c shape): a fitted
+    scale that maps the model's raw depth range onto a span > 2x the tile's own
+    relief is amplification junk, not a real magnitude. It must surface as a
+    warning - joined with the OTHER independent warnings on the same fit - while
+    leaving the numerically-valid fit in place (nothing is rejected or zeroed)."""
+    rng = np.random.default_rng(6)
+    n = 64
+    d = rng.normal(0.5, 0.02, (n, n))
+    spike = rng.random((n, n)) < 0.1
+    d[spike] += 4.0 * rng.normal(0, 1, int(spike.sum())).reshape(-1)
+    noise = rng.normal(0, 1, (n, n))
+    h = 2000.0 * np.sin(3 * np.pi * np.linspace(0, 1, n))[None, :] - 60.0 * (d - 0.5) + noise
+
+    fit = calib.fit_affine(d, h)
+    assert fit.degenerate is False
+    assert fit.calibration_status == "warning"
+    # the magnitude hazard is present, and the sign + flatness hazards of the
+    # same fit are still surfaced instead of being shadowed
+    assert fit.calibration_warning == "negative_scale; prediction_near_constant; scale_too_large"
+    # sanity: the fixture really is the amplification pathology (span > 2x relief)
+    amplification = abs(fit.scale) * float(np.ptp(d)) / float(np.ptp(h))
+    assert amplification > 2.0

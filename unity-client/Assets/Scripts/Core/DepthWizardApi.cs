@@ -54,6 +54,10 @@ namespace DepthWizard.Core
         public float mae;
         public float correlation;
         public string diff_heatmap_url;
+        // Optional diagnostic scatter (reference vs prediction density).
+        public string scatter_url;
+        // Active depth backend slug that produced the validated DSM.
+        public string backend;
         // Additive calibration degeneracy flag from the server: true for flat /
         // near-degenerate tiles. The job itself still completed normally.
         public bool degenerate_calibration;
@@ -69,9 +73,26 @@ namespace DepthWizard.Core
         public string scale_sign;
         public bool polarity_inverted;
         public string polarity_reason;
+        // Calibration fit parameters (server always reports them for absolute
+        // jobs; the client displays them in the results summary).
+        public float calibration_scale;
+        public float calibration_offset;
+        // Additive summary stats on the SAME scored pixels as rmse/mae/
+        // correlation (held-out 20%, or whole grid for legacy jobs), in
+        // meters: bias = mean(prediction - reference), positive = overpredict.
+        public float bias;
+        public float prediction_std;
+        public float reference_std;
         [System.NonSerialized] public bool hasRawCorrelation;
         [System.NonSerialized] public bool hasPolarityInverted;
         [System.NonSerialized] public bool hasPolarityReason;
+        [System.NonSerialized] public bool hasCorrelation;
+        [System.NonSerialized] public bool hasCalibrationScale;
+        [System.NonSerialized] public bool hasCalibrationOffset;
+        [System.NonSerialized] public bool hasBias;
+        [System.NonSerialized] public bool hasPredictionStd;
+        [System.NonSerialized] public bool hasReferenceStd;
+        [System.NonSerialized] public bool hasBackend;
     }
 
     [Serializable]
@@ -202,6 +223,13 @@ namespace DepthWizard.Core
                     resp.hasRawCorrelation = HasNonNullField(body, "raw_correlation_signed");
                     resp.hasPolarityInverted = HasNonNullField(body, "polarity_inverted");
                     resp.hasPolarityReason = HasNonNullField(body, "polarity_reason");
+                    resp.hasCorrelation = HasNonNullField(body, "correlation");
+                    resp.hasCalibrationScale = HasNonNullField(body, "calibration_scale");
+                    resp.hasCalibrationOffset = HasNonNullField(body, "calibration_offset");
+                    resp.hasBias = HasNonNullField(body, "bias");
+                    resp.hasPredictionStd = HasNonNullField(body, "prediction_std");
+                    resp.hasReferenceStd = HasNonNullField(body, "reference_std");
+                    resp.hasBackend = HasNonNullField(body, "backend");
                 }
                 onSuccess?.Invoke(resp);
             }
@@ -210,6 +238,22 @@ namespace DepthWizard.Core
         public IEnumerator ExportDsm(string jobId, Action<byte[]> onSuccess, Action<string> onError)
         {
             using (UnityWebRequest req = UnityWebRequest.Get($"{_baseUrl}/export-dsm/{jobId}"))
+            {
+                req.timeout = 60;
+                yield return req.SendWebRequest();
+
+                if (req.result != UnityWebRequest.Result.Success)
+                {
+                    onError?.Invoke(ParseErrorMessage(req.downloadHandler?.text) ?? req.error);
+                    yield break;
+                }
+
+                onSuccess?.Invoke(req.downloadHandler.data);
+            }
+        }
+        public IEnumerator ExportDem(string jobId, Action<byte[]> onSuccess, Action<string> onError)
+        {
+            using (UnityWebRequest req = UnityWebRequest.Get($"{_baseUrl}/export-dem/{jobId}"))
             {
                 req.timeout = 60;
                 yield return req.SendWebRequest();

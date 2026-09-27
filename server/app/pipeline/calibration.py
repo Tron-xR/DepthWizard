@@ -38,6 +38,16 @@ _SPLIT_SEED = 42
 # guard down with it instead of being flagged for being small.
 _LOW_RELIEF_FRACTION = 0.02
 
+# Magnitude guard: a fit whose predicted span (|scale| * ptp(d_train)) exceeds
+# this fraction of the training terrain's own elevation range is amplification
+# junk. A well-behaved linear fit stays <= ~1x (span <= |rho| * relief + the
+# Rayleigh-explained bound), so > 2x relief is a real artifact margin.
+# ponytail: fixed 2.0 heuristic - two real jobs (8b1b017c 3.72x, 2e290a01 2.56x)
+# trip it, every good fit sits <= 1.1x. Upgrade path if a legit tile ever
+# exceeds it: make the ratio part of the fit (store span/relief) and let the UI
+# render magnitude confidence instead of a hard flag.
+_HIGH_RELIEF_FRACTION = 2.0
+
 # Warning kinds attached to an otherwise-valid calibration fit. They are
 # informational (never null metrics or gate completion).
 _WARN_NEGATIVE_SCALE = "negative_scale"
@@ -45,6 +55,7 @@ _WARN_NEAR_CONSTANT = "prediction_near_constant"
 _WARN_NEAR_ZERO_SCALE = "near_zero_scale"
 _WARN_INSUFFICIENT_VARIANCE = "insufficient_variance"
 _WARN_RANSAC_SIGN_DISAGREEMENT = "ransac_sign_disagreement"
+_WARN_LARGE_SCALE = "scale_too_large"
 
 # Model-polarity threshold on the TRAIN-split raw correlation (relative depth
 # vs true elevation): below this the model output is treated as inverted
@@ -225,21 +236,31 @@ def fit_affine(relative_d: np.ndarray, reference_h: np.ndarray) -> CalibrationFi
         )
 
     # Classify fit health (informational). The fit is numerically VALID and
-    # returned with its exact sign/magnitude intact - only a warning is set:
-    #   negative_scale        -> priority 0: contradicts the brighter=higher
-    #                             convention; never abs()'d (would fake a positive
+    # returned with its exact sign/magnitude intact - only a warning is set.
+    # Warnings are independent truths about the same fit, so ALL applicable
+    # ones accumulate (semicolon-joined) instead of a single priority winner -
+    # a multi-warning fit (e.g. job 8b1b017c: ransac_sign_disagreement AND the
+    # magnitude blow-up below) must surface every hazard, not just the first:
+    #   negative_scale        -> contradicts the brighter=higher convention;
+    #                             never abs()'d (would fake a positive
     #                             association the model does not have).
     #   prediction_near_constant -> prediction variance is below
     #                             config.MIN_RELATIVE_STD of the reference's
     #                             own variance (model output effectively flat).
+    #   scale_too_large       -> |scale| maps the raw range onto a span >
+    #                             _HIGH_RELIEF_FRACTION x the tile's own relief
+    #                             (amplification artifact; magnitude not literal).
     rel_std = sp / sr if sr > 0.0 else float("inf")
-    warning = None
+    warnings = []
     if sign_disagreement:
-        warning = _WARN_RANSAC_SIGN_DISAGREEMENT
-    elif scale < 0.0:
-        warning = _WARN_NEGATIVE_SCALE
-    elif rel_std < config.MIN_RELATIVE_STD:
-        warning = _WARN_NEAR_CONSTANT
+        warnings.append(_WARN_RANSAC_SIGN_DISAGREEMENT)
+    if scale < 0.0:
+        warnings.append(_WARN_NEGATIVE_SCALE)
+    if rel_std < config.MIN_RELATIVE_STD:
+        warnings.append(_WARN_NEAR_CONSTANT)
+    if relief > 0.0 and pred_span > _HIGH_RELIEF_FRACTION * relief:
+        warnings.append(_WARN_LARGE_SCALE)
+    warning = "; ".join(warnings) if warnings else None
     status = "warning" if warning else "valid"
 
     return CalibrationFit(

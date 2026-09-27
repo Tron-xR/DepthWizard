@@ -69,9 +69,16 @@ namespace DepthWizard.UI
         [SerializeField] private float _exaggerationValue = 3f;
 
         private Launcher _launcher;
+        [SerializeField] private ResultsSummary _resultsSummary;
         private ResultResponse _resultData;
         private string _jobId;
         private UnityEngine.Camera _cam;
+
+        /// <summary>Most recent /validate response for the current job, or null.
+        /// Set by OnValidate; cleared by SetResultData so one job's metrics can
+        /// never linger into the next. ResultsSummary reads this to format the
+        /// 8-metric block the user's own button shows.</summary>
+        public ValidationResponse LastValidation { get; private set; }
 
         private Texture2D _cachedHeightTex;
         private Texture2D _cachedSourceTex;
@@ -85,6 +92,7 @@ namespace DepthWizard.UI
         // height/slope math stays exactly correct during and after rotation.
         private bool _displayModeActive;
         private int _displayEnterFrame = -1;
+        private bool _displayEntryHadResults;
         private readonly List<UiSnapshot> _displayUiSnapshot = new List<UiSnapshot>();
 
         private struct UiSnapshot
@@ -114,7 +122,15 @@ namespace DepthWizard.UI
             _cachedHeightTex = null;
             _cachedSourceTex = null;
             _cachedDemTex = null;
+            LastValidation = null;
             SetDemViewShown(false);
+            // A brand-new job resets the view unconditionally: drop any results
+            // text AND the Display-mode reminder of a pre-enter results state,
+            // so neither an open results block nor a later Display-mode exit can
+            // resurrect the previous job's view.
+            if (_resultsSummary != null)
+                _resultsSummary.ToggleResultsView(false);
+            _displayEntryHadResults = false;
             _resultData = data;
             if (isActiveAndEnabled)
                 StartCoroutine(BuildTerrain());
@@ -127,6 +143,7 @@ namespace DepthWizard.UI
         private void Awake()
         {
             _launcher = Object.FindFirstObjectByType<Launcher>(FindObjectsInactive.Include);
+            _resultsSummary = Object.FindFirstObjectByType<ResultsSummary>(FindObjectsInactive.Include);
             _cam = UnityEngine.Camera.main;
             CreateHitMarker();
         }
@@ -423,6 +440,7 @@ namespace DepthWizard.UI
             StartCoroutine(_launcher.Api.Validate(_jobId,
                 onSuccess: resp =>
                 {
+                    LastValidation = resp;
                     if (resp.degenerate_calibration)
                     {
                         // Flat/degenerate tile: surface the server's flag loudly
@@ -501,7 +519,10 @@ namespace DepthWizard.UI
                 onError: err => Debug.LogError($"DEM view download error: {err}")));
         }
 
-        private void SetDemViewShown(bool shown)
+        /// <summary>Show/hide the grayscale DEM overlay GameObject. The single
+        /// chokepoint all DEM-view state changes go through; ResultsSummary calls
+        /// it (public) to hide the overlay when the exclusive results view opens.</summary>
+        public void SetDemViewShown(bool shown)
         {
             _demViewVisible = shown;
             if (_demViewImage != null)
@@ -525,6 +546,7 @@ namespace DepthWizard.UI
         {
             _displayModeActive = true;
             _displayEnterFrame = Time.frameCount;
+            _displayEntryHadResults = _resultsSummary != null && _resultsSummary.IsShowingResults;
             CaptureDisplayUi();
             foreach (UiSnapshot s in _displayUiSnapshot)
                 s.Target.SetActive(false);
@@ -542,6 +564,18 @@ namespace DepthWizard.UI
             _displayUiSnapshot.Clear();
             _displayModeActive = false;
             _displayEnterFrame = -1;
+            // Display mode hides every direct child (including the results text),
+            // so "restored" text shows as blank until re-rendered. If the results
+            // block was the view before entering, show it again - the model was
+            // already deactivated by the results toggle, so leaving the restored
+            // model on screen here would both contradict the stored snapshot and
+            // re-hide the text user asked to keep.
+            if (_displayEntryHadResults)
+            {
+                _displayEntryHadResults = false;
+                if (_resultsSummary != null)
+                    _resultsSummary.ToggleResultsView(true);
+            }
             Debug.Log("Display mode OFF: UI restored, rotation stopped.");
         }
 
@@ -654,6 +688,56 @@ namespace DepthWizard.UI
             if (_validationResultText != null)
                 _validationResultText.text = $"DSM exported:\n{path}";
             Debug.Log($"DSM export saved: {path}");
+        }
+
+        /// <summary>
+        /// Download the job's bare-earth DEM GeoTIFF (same source raster as the
+        /// DSM export, with buildings/trees/vegetation removed on the server by
+        /// the progressive morphological ground filter) and write it to the
+        /// caller's chosen destination path. Requires a georeferenced input,
+        /// exactly like the DSM export. The GeoTIFF content is the filtered
+        /// surface, not a relabeled copy of the DSM. Called by DemExportUI
+        /// after the native Save As dialog.
+        /// </summary>
+        /// <param name="savePath">Full destination path the user picked.</param>
+        public void ExportDem(string savePath)
+        {
+            if (string.IsNullOrEmpty(_jobId))
+            {
+                _validationResultText.text = "DEM export unavailable: no job loaded yet.";
+                return;
+            }
+            if (_launcher == null)
+                _launcher = Object.FindFirstObjectByType<Launcher>(FindObjectsInactive.Include);
+            if (_launcher == null || _launcher.Api == null)
+            {
+                _validationResultText.text = "DEM export unavailable: launcher not found.";
+                return;
+            }
+            if (string.IsNullOrEmpty(savePath))
+            {
+                _validationResultText.text = "DEM export cancelled.";
+                return;
+            }
+
+            _validationResultText.text = "Exporting DEM...";
+            _validationResultText.color = Color.white;
+
+            StartCoroutine(_launcher.Api.ExportDem(_jobId,
+                onSuccess: bytes => SaveDemFile(bytes, savePath),
+                onError: err =>
+                {
+                    _validationResultText.color = Color.white;
+                    _validationResultText.text = $"DEM export error: {err}";
+                }));
+        }
+
+        private void SaveDemFile(byte[] bytes, string path)
+        {
+            File.WriteAllBytes(path, bytes);
+            if (_validationResultText != null)
+                _validationResultText.text = $"DEM exported:\n{path}";
+            Debug.Log($"DEM export saved: {path}");
         }
 
         private void OnMenu()

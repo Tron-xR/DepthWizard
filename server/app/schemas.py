@@ -23,6 +23,10 @@ class StatusResponse(BaseModel):
     status: str
     progress: Optional[float] = None
     stage: Optional[str] = None
+    # Human-readable failure detail for status == "failed" (the job's recorded
+    # error_message). Always present for failed jobs so the client can render a
+    # real message instead of a blank "Failed:".
+    message: Optional[str] = None
 
 
 class ResultResponse(BaseModel):
@@ -48,6 +52,13 @@ class ValidationResponse(BaseModel):
     correlation: Optional[float] = None
     correlation_reason: Optional[str] = None
     diff_heatmap_url: str
+    # Reference(x) vs prediction(y) density scatter over the same scored pixels,
+    # with an identity line; served like diff_heatmap_url.
+    scatter_url: Optional[str] = None
+    # Active depth backend that produced the validated DSM (slug: "finetuned",
+    # "pix2pix", "imele", "depth_anything"). Matches the BACKEND traceability
+    # tag on DSM exports.
+    backend: Optional[str] = None
     # Pixels scored (always the held-out 20% for jobs processed with holdout
     # persistence; null for legacy all-pixel results).
     held_out_pixel_count: Optional[int] = None
@@ -64,6 +75,14 @@ class ValidationResponse(BaseModel):
     calibration_warning: Optional[str] = None
     calibration_scale: Optional[float] = None
     calibration_offset: Optional[float] = None
+    # Additive summary statistics over the SAME scored pixels as rmse/mae/
+    # correlation (the persisted held-out 20%, or the whole grid for legacy
+    # jobs): bias = mean(predicted - reference) (positive = model overpredicts,
+    # matching the p - r diff sign of compute_metrics), and the std of each
+    # surface. All in meters like RMSE/MAE.
+    bias: Optional[float] = None
+    prediction_std: Optional[float] = None
+    reference_std: Optional[float] = None
     # Model polarity on the held-out 20% (raw relative depth vs reference,
     # UNcalibrated): the signed correlation before any calibration flip.
     raw_correlation_signed: Optional[float] = None

@@ -32,6 +32,42 @@ def _local_dem() -> Optional[np.ndarray]:
     return data
 
 
+def _local_calibration_dem() -> Optional[np.ndarray]:
+    """Calibration-only local GeoTIFF (DEPTHWIZARD_CALIBRATION_DEM_FILE)."""
+    path = os.environ.get("DEPTHWIZARD_CALIBRATION_DEM_FILE")
+    if not path:
+        return None
+    import rasterio
+
+    with rasterio.open(path) as src:
+        return src.read(1).astype("float32")
+
+
+def fetch_calibration_reference_dem(bounds: list, crs: str,
+                                    source: str = "SRTM",
+                                    dem_type: str = "SRTMGL3",
+                                    use_cache: bool = True) -> tuple:
+    """Reference DEM for the CALIBRATION step only.
+
+    Copernicus GLO-30 stays a validation-only reference (/validate compares the
+    produced DSM against `fetch_reference_dem`'s tile), so the calibration step
+    can pin an independent source via DEPTHWIZARD_CALIBRATION_DEM_FILE (a local
+    GeoTIFF, reported as source "local"). When unset it falls back to the shared
+    fetch, keeping existing deployments and tests behavior-identical.
+    """
+    local = _local_calibration_dem()
+    if local is not None:
+        return local, {
+            "source": "local",
+            "crs": crs,
+            "width": local.shape[1],
+            "height": local.shape[0],
+            "transform": None,
+        }
+    return fetch_reference_dem(bounds, crs, source=source, dem_type=dem_type,
+                               use_cache=use_cache)
+
+
 # --------------------------------------------------------------------------- #
 # Disk cache for network-fetched reference DEMs (separate, reviewable change).
 #

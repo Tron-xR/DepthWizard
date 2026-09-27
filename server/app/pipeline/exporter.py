@@ -94,6 +94,57 @@ def export_geotiff(elevation: np.ndarray, crs: str, transform, bounds, path: Pat
         dst.write(elevation.astype("float32"), 1)
 
 
+# Meters allocated to one degree of latitude (also the reference conversion
+# used by compute_world_dimensions for geographic CRS spanning).
+_M_PER_DEG = 111320.0
+
+
+def pixel_size_meters(crs: Optional[str], transform) -> float:
+    """Best-effort ground resolution of a raster pixel, in meters.
+
+    Projected CRS pixel sizes are already metric (mean of the x/y axes).
+    Geographic CRS pixels are in degrees: convert the latitude axis with the
+    same 111320 m/deg conversion compute_world_dimensions uses (the longitude
+    axis would need a cos(lat) factor; the lat axis is the cos-free invariant,
+    and raster pixels are approximately square on the ground).
+    """
+    x_res = abs(transform.a)
+    y_res = abs(transform.e)
+    if crs:
+        from rasterio.crs import CRS
+
+        if CRS.from_user_input(crs).is_geographic:
+            return float(y_res * _M_PER_DEG)
+    return float(max((x_res + y_res) / 2.0, 1e-9))
+
+
+def _write_tagged_geotiff(data: np.ndarray, profile: dict, out_path: Path,
+                          tags: dict) -> str:
+    """Single GeoTIFF writer: deflate + traceability tags over an elevation band."""
+    import rasterio
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    profile.update(compress="deflate", nodata=None)
+    with rasterio.open(out_path, "w", **profile) as dst:
+        dst.write(data, 1)
+        dst.update_tags(**tags)
+    return str(out_path)
+
+
+def _export_tags(*, job_id: str, input_filename: str, backend: str, model: str,
+                 min_elev: Optional[float], max_elev: Optional[float]) -> dict:
+    """Traceability tag set shared by DSM and DEM exports."""
+    return {
+        "MODEL": model,
+        "BACKEND": backend,
+        "JOB_ID": job_id,
+        "INPUT": Path(input_filename).name,
+        "VERTICAL_EXAGGERATION": "none",
+        "MIN_ELEVATION_M": f"{min_elev:.6g}" if min_elev is not None else "",
+        "MAX_ELEVATION_M": f"{max_elev:.6g}" if max_elev is not None else "",
+    }
+
+
 def export_dsm_geotiff(source_tif: Path, out_path: Path, *, job_id: str,
                        input_filename: str, backend: str, model: str,
                        min_elev: Optional[float], max_elev: Optional[float]) -> str:
@@ -107,24 +158,51 @@ def export_dsm_geotiff(source_tif: Path, out_path: Path, *, job_id: str,
     """
     import rasterio
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
     with rasterio.open(source_tif) as src:
         data = src.read(1)
         profile = src.profile.copy()
-    profile.update(compress="deflate", nodata=None)
-    with rasterio.open(out_path, "w", **profile) as dst:
-        dst.write(data, 1)
-        dst.update_tags(
-            SOURCE="DepthWizard model-estimated DSM (NOT ground truth)",
-            MODEL=model,
-            BACKEND=backend,
-            JOB_ID=job_id,
-            INPUT=Path(input_filename).name,
-            VERTICAL_EXAGGERATION="none",
-            MIN_ELEVATION_M=f"{min_elev:.6g}" if min_elev is not None else "",
-            MAX_ELEVATION_M=f"{max_elev:.6g}" if max_elev is not None else "",
-        )
-    return str(out_path)
+    tags = {
+        "SOURCE": "DepthWizard model-estimated DSM (NOT ground truth)",
+        **_export_tags(job_id=job_id, input_filename=input_filename,
+                       backend=backend, model=model,
+                       min_elev=min_elev, max_elev=max_elev),
+    }
+    return _write_tagged_geotiff(data, profile, out_path, tags)
+
+
+def export_dem_geotiff(source_tif: Path, out_path: Path, *, job_id: str,
+                       input_filename: str, backend: str, model: str,
+                       min_elev: Optional[float], max_elev: Optional[float]) -> str:
+    """Write a downloadable bare-earth DEM GeoTIFF for a job's real DSM.
+
+    Same source as export_dsm_geotiff (the archived float32 dsm.tif: CRS,
+    transform, and the whole elevation band) but the band is run through the
+    progressive morphological filter first, so buildings/trees are removed and
+    the output is a bare-earth estimate. Written with the exact same
+    _write_tagged_geotiff code path as the DSM export - only the band differs.
+    Returns the output path.
+    """
+    import rasterio
+
+    from . import dem_filter
+
+    with rasterio.open(source_tif) as src:
+        data = src.read(1).astype("float64")
+        profile = src.profile.copy()
+        crs, transform = src.crs, src.transform
+
+    cell_size = pixel_size_meters(crs, transform)
+    dem = dem_filter.progressive_morphological_filter(data, cell_size)
+
+    tags = {
+        "SOURCE": "DepthWizard model-estimated bare-earth DEM "
+                  "(buildings/trees removed via progressive morphological filter)",
+        "FILTER": "progressive_morphological_filter(Zhang et al. 2003)",
+        **_export_tags(job_id=job_id, input_filename=input_filename,
+                       backend=backend, model=model,
+                       min_elev=min_elev, max_elev=max_elev),
+    }
+    return _write_tagged_geotiff(dem, profile, out_path, tags)
 
 
 def compute_world_dimensions(height: int, width: int,

@@ -85,7 +85,9 @@ onSuccess: resp =>
                                 break;
                             case "failed":
                                 _polling = false;
-                                _stageText.text = $"Failed: {resp.message}";
+                                _stageText.text = string.IsNullOrEmpty(resp.message)
+                                    ? "Failed: unknown server error (no detail returned)"
+                                    : $"Failed: {resp.message}";
                                 break;
                         }
                     },

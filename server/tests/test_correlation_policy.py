@@ -81,7 +81,9 @@ def test_f_negative_correlation_kept_and_fit_flagged():
     assert fit.scale == pytest.approx(-100.0, abs=1e-3)   # kept, NOT abs()'d
     assert fit.degenerate is False
     assert fit.calibration_status == "warning"
-    assert fit.calibration_warning == "negative_scale"
+    # warnings accumulate (single field, "; "-joined): ramp 0..1 vs relief 120
+    # makes the fixture near-constant too, surfaced next to the sign warning
+    assert fit.calibration_warning == "negative_scale; prediction_near_constant"
 
     # Raw (uncalibrated) relative-depth correlation stays NEGATIVE - the sign
     # is never flipped anywhere in the API.
@@ -96,7 +98,7 @@ def test_f_negative_correlation_kept_and_fit_flagged():
     cal = ev.evaluate_prediction_truth(ramp, dem, mode="calibrated")
     assert cal["correlation"] == pytest.approx(1.0, abs=1e-6)
     assert cal["calibration_scale"] == pytest.approx(-100.0, abs=1e-3)
-    assert cal["calibration_warning"] == "negative_scale"
+    assert cal["calibration_warning"] == "negative_scale; prediction_near_constant"
 
 
 # ---- near-constant prediction is a warning on a VALID fit -------------------- #
