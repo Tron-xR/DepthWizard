@@ -497,6 +497,12 @@ Calibration fits a linear model to the relationship between model output and ref
 - **Experimental:** In `tools/` or `decoder_training/`, not production
 - **Known limitation:** Explicitly documented in source or design docs
 
+### 12.7 RGB vs Coarse DEM Prior (Task 2 experiment)
+
+**Observed:** RGB imagery adds essentially nothing usable beyond a coarse DEM prior. Arms B (RGB + coarse prior) and D (coarse prior only, RGB zeroed) were compared against C (bicubic-upsampled coarse DEM, no model) with ring-2 spatial-block CV, 4 folds, 3 seeds, and a held-out 20% pixel split. The image's only statistically detectable gain is ~+0.03..+0.05 residual detail (resid_r) at the coarser 250 m prior (B250-C250 CI excludes 0), while at the 90 m prior it is absent or negative. Every model arm is 3-8x worse than a free bicubic upsampler of the coarse DEM in MAE/RMSE (B90 68.8 m vs C90 5.8 m; B250 74.8 m vs C250 16.6 m). An independent USGS 3DEP reference on 56 CONUS tiles confirms the same pattern (small-positive image detail only).
+
+**Status:** Verified; full numbers, per-tile data, and repro scripts in `docs/experiment/`.
+
 ---
 
 ## 13. Datasets and Reference Sources
