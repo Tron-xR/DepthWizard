@@ -5,7 +5,7 @@ Determines whether RGB imagery adds elevation information beyond a coarse DEM pr
 ## Verdict
 **The image adds essentially nothing usable.** Model arms (B = RGB+coarse, D = coarse-only)
 are 3-8x worse in absolute error than a free bicubic upsampler of the coarse DEM (C), and
-the image's gain never survives the absolute-error comparison. See `../../18-rgb-vs-coarse-prior.md`.
+the image's gain never survives the absolute-error comparison. Full report below.
 
 ## Layout
 - `data/metrics/` — per-tile metrics, one file per arm-seed (`metrics_*`, truth = COP30/Tilezen) and per-arm-seed vs independent USGS 3DEP (`metrics3dep_*`, 56 CONUS tiles).
