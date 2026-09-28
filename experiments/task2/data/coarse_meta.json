@@ -1,0 +1,834 @@
+[
+  {
+    "tile": "forested/forested_00",
+    "fam": "forested",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 29.944,
+    "f_B90": 3,
+    "f_B250": 8
+  },
+  {
+    "tile": "forested/forested_01",
+    "fam": "forested",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 29.997,
+    "f_B90": 3,
+    "f_B250": 8
+  },
+  {
+    "tile": "forested/forested_02",
+    "fam": "forested",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 29.984,
+    "f_B90": 3,
+    "f_B250": 8
+  },
+  {
+    "tile": "forested/forested_03",
+    "fam": "forested",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 29.971,
+    "f_B90": 3,
+    "f_B250": 8
+  },
+  {
+    "tile": "forested/forested_04",
+    "fam": "forested",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 30.036,
+    "f_B90": 3,
+    "f_B250": 8
+  },
+  {
+    "tile": "forested/forested_05",
+    "fam": "forested",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 30.023,
+    "f_B90": 3,
+    "f_B250": 8
+  },
+  {
+    "tile": "forested/forested_06",
+    "fam": "forested",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 30.01,
+    "f_B90": 3,
+    "f_B250": 8
+  },
+  {
+    "tile": "forested/forested_07",
+    "fam": "forested",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 30.01,
+    "f_B90": 3,
+    "f_B250": 8
+  },
+  {
+    "tile": "forested/forested_08",
+    "fam": "forested",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 30.062,
+    "f_B90": 3,
+    "f_B250": 8
+  },
+  {
+    "tile": "forested/forested_09",
+    "fam": "forested",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 30.049,
+    "f_B90": 3,
+    "f_B250": 8
+  },
+  {
+    "tile": "forested/forested_10",
+    "fam": "forested",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 30.036,
+    "f_B90": 3,
+    "f_B250": 8
+  },
+  {
+    "tile": "forested/forested_11",
+    "fam": "forested",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 30.099,
+    "f_B90": 3,
+    "f_B250": 8
+  },
+  {
+    "tile": "forested/forested_12",
+    "fam": "forested",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 30.087,
+    "f_B90": 3,
+    "f_B250": 8
+  },
+  {
+    "tile": "forested/forested_13",
+    "fam": "forested",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 30.074,
+    "f_B90": 3,
+    "f_B250": 8
+  },
+  {
+    "tile": "forested/forested_14",
+    "fam": "forested",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 28.238,
+    "f_B90": 3,
+    "f_B250": 9
+  },
+  {
+    "tile": "forested/forested_15",
+    "fam": "forested",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 28.303,
+    "f_B90": 3,
+    "f_B250": 9
+  },
+  {
+    "tile": "forested/forested_16",
+    "fam": "forested",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 28.314,
+    "f_B90": 3,
+    "f_B250": 9
+  },
+  {
+    "tile": "forested/forested_17",
+    "fam": "forested",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 28.325,
+    "f_B90": 3,
+    "f_B250": 9
+  },
+  {
+    "tile": "hilly/hilly_00",
+    "fam": "hilly",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 25.696,
+    "f_B90": 4,
+    "f_B250": 10
+  },
+  {
+    "tile": "hilly/hilly_01",
+    "fam": "hilly",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 25.786,
+    "f_B90": 3,
+    "f_B250": 10
+  },
+  {
+    "tile": "hilly/hilly_02",
+    "fam": "hilly",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 25.875,
+    "f_B90": 3,
+    "f_B250": 10
+  },
+  {
+    "tile": "hilly/hilly_03",
+    "fam": "hilly",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 25.786,
+    "f_B90": 3,
+    "f_B250": 10
+  },
+  {
+    "tile": "hilly/hilly_04",
+    "fam": "hilly",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 25.875,
+    "f_B90": 3,
+    "f_B250": 10
+  },
+  {
+    "tile": "hilly/hilly_05",
+    "fam": "hilly",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 25.786,
+    "f_B90": 3,
+    "f_B250": 10
+  },
+  {
+    "tile": "hilly/hilly_06",
+    "fam": "hilly",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 25.875,
+    "f_B90": 3,
+    "f_B250": 10
+  },
+  {
+    "tile": "hilly/hilly_07",
+    "fam": "hilly",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 25.786,
+    "f_B90": 3,
+    "f_B250": 10
+  },
+  {
+    "tile": "hilly/hilly_08",
+    "fam": "hilly",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 25.875,
+    "f_B90": 3,
+    "f_B250": 10
+  },
+  {
+    "tile": "hilly/hilly_09",
+    "fam": "hilly",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 25.963,
+    "f_B90": 3,
+    "f_B250": 10
+  },
+  {
+    "tile": "hilly/hilly_10",
+    "fam": "hilly",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 25.875,
+    "f_B90": 3,
+    "f_B250": 10
+  },
+  {
+    "tile": "hilly/hilly_11",
+    "fam": "hilly",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 25.963,
+    "f_B90": 3,
+    "f_B250": 10
+  },
+  {
+    "tile": "hilly/hilly_12",
+    "fam": "hilly",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 25.875,
+    "f_B90": 3,
+    "f_B250": 10
+  },
+  {
+    "tile": "hilly/hilly_13",
+    "fam": "hilly",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 25.963,
+    "f_B90": 3,
+    "f_B250": 10
+  },
+  {
+    "tile": "hilly/hilly_14",
+    "fam": "hilly",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 22.046,
+    "f_B90": 4,
+    "f_B250": 11
+  },
+  {
+    "tile": "hilly/hilly_15",
+    "fam": "hilly",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 22.008,
+    "f_B90": 4,
+    "f_B250": 11
+  },
+  {
+    "tile": "hilly/hilly_16",
+    "fam": "hilly",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 21.97,
+    "f_B90": 4,
+    "f_B250": 11
+  },
+  {
+    "tile": "hilly/hilly_17",
+    "fam": "hilly",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 21.932,
+    "f_B90": 4,
+    "f_B250": 11
+  },
+  {
+    "tile": "sparse/sparse_00",
+    "fam": "sparse",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 24.384,
+    "f_B90": 4,
+    "f_B250": 10
+  },
+  {
+    "tile": "sparse/sparse_01",
+    "fam": "sparse",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 24.45,
+    "f_B90": 4,
+    "f_B250": 10
+  },
+  {
+    "tile": "sparse/sparse_02",
+    "fam": "sparse",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 24.45,
+    "f_B90": 4,
+    "f_B250": 10
+  },
+  {
+    "tile": "sparse/sparse_03",
+    "fam": "sparse",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 24.45,
+    "f_B90": 4,
+    "f_B250": 10
+  },
+  {
+    "tile": "sparse/sparse_04",
+    "fam": "sparse",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 24.549,
+    "f_B90": 4,
+    "f_B250": 10
+  },
+  {
+    "tile": "sparse/sparse_05",
+    "fam": "sparse",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 24.549,
+    "f_B90": 4,
+    "f_B250": 10
+  },
+  {
+    "tile": "sparse/sparse_06",
+    "fam": "sparse",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 24.549,
+    "f_B90": 4,
+    "f_B250": 10
+  },
+  {
+    "tile": "sparse/sparse_07",
+    "fam": "sparse",
+    "src": "trainset",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 24.549,
+    "f_B90": 4,
+    "f_B250": 10
+  },
+  {
+    "tile": "sparse/sparse_08",
+    "fam": "sparse",
+    "src": "trainset",
+    "crs": "EPSG:3857",
+    "shape": [
+      1792,
+      1280
+    ],
+    "pitch_m": 19.109,
+    "f_B90": 5,
+    "f_B250": 13
+  },
+  {
+    "tile": "sparse/sparse_09",
+    "fam": "sparse",
+    "src": "trainset",
+    "crs": "EPSG:3857",
+    "shape": [
+      1536,
+      1536
+    ],
+    "pitch_m": 19.109,
+    "f_B90": 5,
+    "f_B250": 13
+  },
+  {
+    "tile": "sparse/sparse_10",
+    "fam": "sparse",
+    "src": "trainset",
+    "crs": "EPSG:3857",
+    "shape": [
+      1792,
+      1536
+    ],
+    "pitch_m": 19.109,
+    "f_B90": 5,
+    "f_B250": 13
+  },
+  {
+    "tile": "sparse/sparse_11",
+    "fam": "sparse",
+    "src": "trainset",
+    "crs": "EPSG:3857",
+    "shape": [
+      1792,
+      1536
+    ],
+    "pitch_m": 19.109,
+    "f_B90": 5,
+    "f_B250": 13
+  },
+  {
+    "tile": "sparse/sparse_12",
+    "fam": "sparse",
+    "src": "trainset",
+    "crs": "EPSG:3857",
+    "shape": [
+      1792,
+      1280
+    ],
+    "pitch_m": 19.109,
+    "f_B90": 5,
+    "f_B250": 13
+  },
+  {
+    "tile": "sparse/sparse_13",
+    "fam": "sparse",
+    "src": "trainset",
+    "crs": "EPSG:3857",
+    "shape": [
+      1536,
+      1536
+    ],
+    "pitch_m": 19.109,
+    "f_B90": 5,
+    "f_B250": 13
+  },
+  {
+    "tile": "sparse/sparse_14",
+    "fam": "sparse",
+    "src": "trainset",
+    "crs": "EPSG:3857",
+    "shape": [
+      1792,
+      1536
+    ],
+    "pitch_m": 19.109,
+    "f_B90": 5,
+    "f_B250": 13
+  },
+  {
+    "tile": "sparse/sparse_15",
+    "fam": "sparse",
+    "src": "trainset",
+    "crs": "EPSG:3857",
+    "shape": [
+      1792,
+      1536
+    ],
+    "pitch_m": 19.109,
+    "f_B90": 5,
+    "f_B250": 13
+  },
+  {
+    "tile": "sparse/sparse_16",
+    "fam": "sparse",
+    "src": "trainset",
+    "crs": "EPSG:3857",
+    "shape": [
+      1792,
+      1536
+    ],
+    "pitch_m": 19.109,
+    "f_B90": 5,
+    "f_B250": 13
+  },
+  {
+    "tile": "sparse/sparse_17",
+    "fam": "sparse",
+    "src": "trainset",
+    "crs": "EPSG:3857",
+    "shape": [
+      1792,
+      1280
+    ],
+    "pitch_m": 19.109,
+    "f_B90": 5,
+    "f_B250": 13
+  },
+  {
+    "tile": "hilly_alps",
+    "fam": "hilly",
+    "src": "heldout",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 27.478,
+    "f_B90": 3,
+    "f_B250": 9
+  },
+  {
+    "tile": "hilly_uttarakhand",
+    "fam": "hilly",
+    "src": "heldout",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 18.055,
+    "f_B90": 5,
+    "f_B250": 14
+  },
+  {
+    "tile": "hilly_colorado",
+    "fam": "hilly",
+    "src": "heldout",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 26.007,
+    "f_B90": 3,
+    "f_B250": 10
+  },
+  {
+    "tile": "forested_olympic",
+    "fam": "forested",
+    "src": "heldout",
+    "crs": "EPSG:3857",
+    "shape": [
+      2048,
+      1536
+    ],
+    "pitch_m": 19.109,
+    "f_B90": 5,
+    "f_B250": 13
+  },
+  {
+    "tile": "forested_westernghats",
+    "fam": "forested",
+    "src": "heldout",
+    "crs": "EPSG:3857",
+    "shape": [
+      1536,
+      1536
+    ],
+    "pitch_m": 19.109,
+    "f_B90": 5,
+    "f_B250": 13
+  },
+  {
+    "tile": "sparse_mojave",
+    "fam": "sparse",
+    "src": "heldout",
+    "crs": "EPSG:3857",
+    "shape": [
+      1536,
+      1280
+    ],
+    "pitch_m": 19.109,
+    "f_B90": 5,
+    "f_B250": 13
+  },
+  {
+    "tile": "sparse_thar",
+    "fam": "sparse",
+    "src": "heldout",
+    "crs": "EPSG:3857",
+    "shape": [
+      1536,
+      1280
+    ],
+    "pitch_m": 19.109,
+    "f_B90": 5,
+    "f_B250": 13
+  },
+  {
+    "tile": "colorado_original",
+    "fam": "hilly",
+    "src": "geo_test",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 26.007,
+    "f_B90": 3,
+    "f_B250": 10
+  },
+  {
+    "tile": "colorado_north",
+    "fam": "hilly",
+    "src": "geo_test",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 26.036,
+    "f_B90": 3,
+    "f_B250": 10
+  },
+  {
+    "tile": "colorado_west",
+    "fam": "hilly",
+    "src": "geo_test",
+    "crs": "EPSG:4326",
+    "shape": [
+      720,
+      720
+    ],
+    "pitch_m": 25.978,
+    "f_B90": 3,
+    "f_B250": 10
+  }
+]
