@@ -122,8 +122,9 @@ packaged single-folder Windows build of the server is documented in
 
 ## Quick Start
 
-> **Just want to run it?** Download the full standalone Windows build (~6.5 GB, player
-> and bundled server included — no Python or separate server setup needed):
+> **Just want to run it?** Download the **latest version** of the full standalone Windows
+> build (~6.5 GB, player and bundled server included — no Python or separate server
+> setup needed; current build #2029900):
 >
 > **<https://tron-x.itch.io/depthwizard>**
 >
