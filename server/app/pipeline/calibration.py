@@ -93,6 +93,13 @@ class CalibrationFit:
     # (constant prediction/reference on the train split).
     polarity_inverted: Optional[bool] = None
     polarity_reason: Optional[str] = None
+    # Diagnostic pair recorded BEFORE the sign reconciliation and the low-relief
+    # guard run: the RANSAC-inlier-refit slope and the full-train OLS slope.
+    # When they disagree on sign the fit uses the OLS slope (44295b8); keeping
+    # both values on the fit makes any sign decision auditable after the fact.
+    # None on the degenerate_constant paths (no OLS was computed there).
+    ransac_scale: Optional[float] = None
+    ols_scale: Optional[float] = None
 
 
 def fit_affine(relative_d: np.ndarray, reference_h: np.ndarray) -> CalibrationFit:
@@ -103,6 +110,10 @@ def fit_affine(relative_d: np.ndarray, reference_h: np.ndarray) -> CalibrationFi
     runs on the training 80% only, so the held-out set is never seen during
     calibration. RANSAC robustifies against outlier elevation (buildings,
     vegetation) within the training set.
+
+    Determinism: the split seed and RANSAC random_state are fixed, so repeated
+    fits on identical inputs are bit-identical. The pre-decision slopes are
+    recorded on the fit (ransac_scale / ols_scale) for auditability.
 
     relative_d, reference_h: same-shaped 2D arrays.
     """
@@ -233,6 +244,8 @@ def fit_affine(relative_d: np.ndarray, reference_h: np.ndarray) -> CalibrationFi
             pred_std=sp, ref_std=sr,
             polarity_inverted=polarity_inverted,
             polarity_reason=polarity_reason,
+            ransac_scale=ransac_scale,
+            ols_scale=ols_scale,
         )
 
     # Classify fit health (informational). The fit is numerically VALID and
@@ -278,6 +291,8 @@ def fit_affine(relative_d: np.ndarray, reference_h: np.ndarray) -> CalibrationFi
         ref_std=sr,
         polarity_inverted=polarity_inverted,
         polarity_reason=polarity_reason,
+        ransac_scale=ransac_scale,
+        ols_scale=ols_scale,
     )
 
 
@@ -308,6 +323,10 @@ def save_fit(fit: CalibrationFit, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     held_r = fit.held_relative.astype("float64") if fit.held_relative is not None else np.empty(0)
     held_h = fit.held_reference.astype("float64") if fit.held_reference is not None else np.empty(0)
+
+    def _maybe(v):
+        return np.float64(v) if v is not None else np.float64(np.nan)
+
     np.savez(
         path,
         scale=np.float64(fit.scale),
@@ -322,6 +341,8 @@ def save_fit(fit: CalibrationFit, path: Path) -> None:
         polarity_inverted=np.int8(-1) if fit.polarity_inverted is None
         else np.int8(int(fit.polarity_inverted)),
         polarity_reason=np.asarray(fit.polarity_reason or ""),
+        ransac_scale=_maybe(fit.ransac_scale),
+        ols_scale=_maybe(fit.ols_scale),
         held_relative=held_r,
         held_reference=held_h,
     )
@@ -354,6 +375,13 @@ def load_fit(path: Path) -> Optional[CalibrationFit]:
         p_reason_raw = z["polarity_reason"] if "polarity_reason" in z.files else np.asarray("")
         p_reason_raw = p_reason_raw.item() if p_reason_raw.size else ""
         polarity_reason = str(p_reason_raw) if p_reason_raw else None
+
+        def _opt_float(key):
+            if key not in z.files:
+                return None
+            v = float(z[key])
+            return None if np.isnan(v) else v
+
         return CalibrationFit(
             scale=float(z["scale"]),
             offset=float(z["offset"]),
@@ -368,6 +396,8 @@ def load_fit(path: Path) -> Optional[CalibrationFit]:
             calibration_warning=cal_warn,
             polarity_inverted=polarity_inverted,
             polarity_reason=polarity_reason,
+            ransac_scale=_opt_float("ransac_scale"),
+            ols_scale=_opt_float("ols_scale"),
         )
 
 

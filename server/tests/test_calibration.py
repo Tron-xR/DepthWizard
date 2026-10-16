@@ -1,8 +1,14 @@
 """Unit tests for the scale-calibration math (Epic 3, 09-tech-stack RANSAC fit)."""
+from pathlib import Path
+
 import numpy as np
 import pytest
 
 from app.pipeline import calibration as calib
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+_PIX2PIX_PREDICTIONS = (REPO_ROOT / "benchmark_runs" / "c3a2841_pix2pix_20261016T134335Z"
+                        / "predictions")
 
 
 def test_fit_affine_recovers_exact_scale_offset():
@@ -125,6 +131,8 @@ def test_save_load_fit_round_trip(tmp_path):
     assert loaded.offset == fit.offset
     assert loaded.method == fit.method
     assert loaded.degenerate is False
+    assert loaded.ransac_scale == fit.ransac_scale
+    assert loaded.ols_scale == fit.ols_scale
     np.testing.assert_array_equal(loaded.held_relative, fit.held_relative)
     np.testing.assert_array_equal(loaded.held_reference, fit.held_reference)
     # legacy jobs simply have no file -> None, never a crash
@@ -193,3 +201,148 @@ def test_fit_affine_flags_absurd_magnitude_scale():
     # sanity: the fixture really is the amplification pathology (span > 2x relief)
     amplification = abs(fit.scale) * float(np.ptp(d)) / float(np.ptp(h))
     assert amplification > 2.0
+
+
+# ---------------------------------------------------------------------------
+# Phase-3/4 additions: audit fields, determinism, holdout purity, and the
+# diagnosed flip shapes (sign reconciliation + low-relief guard).
+# ---------------------------------------------------------------------------
+def test_fit_affine_deterministic_and_records_both_candidate_slopes():
+    rng = np.random.default_rng(11)
+    d = rng.uniform(0, 1, (64, 64))
+    h = 300.0 * d + 10.0 + rng.normal(0, 5.0, d.shape)
+    fit_a = calib.fit_affine(d, h)
+    fit_b = calib.fit_affine(d, h)
+    assert fit_a.scale == fit_b.scale
+    assert fit_a.offset == fit_b.offset
+    # the pre-decision RANSAC / OLS slopes are recorded on the fit and repeatable
+    assert fit_a.ransac_scale is not None and fit_a.ols_scale is not None
+    assert fit_a.ransac_scale == fit_b.ransac_scale
+    assert fit_a.ols_scale == fit_b.ols_scale
+    # clean data: both candidates agree in sign with the final scale
+    assert fit_a.ransac_scale > 0.0 and fit_a.ols_scale > 0.0
+
+
+def test_held_out_pixels_never_influence_the_fit():
+    rng = np.random.default_rng(12)
+    d = rng.uniform(0, 1, size=(64, 64))
+    h = 150.0 * d + 25.0
+    fit = calib.fit_affine(d, h)
+    # reconstruct the fixed-seed split contract: corrupt ONLY the held-out 20%
+    order = np.random.default_rng(calib._SPLIT_SEED).permutation(d.size)
+    n_train = int(round(d.size * calib._TRAIN_FRACTION))
+    h2 = h.ravel().copy()
+    h2[order[n_train:]] += 1e6
+    fit2 = calib.fit_affine(d, h2.reshape(h.shape))
+    assert fit2.scale == fit.scale
+    assert fit2.offset == fit.offset
+    assert fit2.rmse == fit.rmse
+
+
+def test_fit_affine_drops_nan_and_inf_pixels():
+    rng = np.random.default_rng(13)
+    d = rng.uniform(0, 1, (32, 32))
+    h = 100.0 * d + 5.0
+    d[0, :4] = np.nan
+    h[1, :4] = np.inf
+    h[2, :4] = np.nan
+    fit = calib.fit_affine(d, h)
+    assert fit.n_samples == int((np.isfinite(d) & np.isfinite(h)).sum())
+    assert fit.scale == pytest.approx(100.0, rel=1e-6)
+
+
+def test_sign_stable_under_pixel_permutation_and_float32():
+    rng = np.random.default_rng(14)
+    d = rng.uniform(0, 1, size=(64, 64))
+    h = 220.0 * d + 30.0 + rng.normal(0, 3.0, d.shape)
+    fit = calib.fit_affine(d, h)
+    idx = rng.permutation(d.size)
+    fit_p = calib.fit_affine(d.ravel()[idx].reshape(d.shape), h.ravel()[idx].reshape(h.shape))
+    assert fit_p.scale > 0.0
+    assert fit_p.scale == pytest.approx(fit.scale, rel=0.05)
+    fit32 = calib.fit_affine(d.astype("float32"), h)
+    assert fit32.scale > 0.0
+    assert fit32.scale == pytest.approx(fit.scale, rel=1e-4)
+
+
+def test_ransac_positive_ols_negative_keeps_negative_ols():
+    """forested_10/11 shape (mirror of the sparse_01 fixture): RANSAC locks onto
+    a tight POSITIVE sub-population while the full-train OLS is clearly NEGATIVE.
+    The fit must keep the OLS sign (negative) and flag the disagreement - it must
+    never force the scale positive to satisfy the brighter=higher convention."""
+    rng = np.random.default_rng(8)
+    n = 4096
+    d = rng.uniform(0, 1, n)
+    is_band = rng.random(n) < 0.8
+    h = np.where(is_band,
+                 400.0 * d + 350.0 + rng.normal(0, 2.0, n),      # tight positive band
+                 -15000.0 * d + 12000.0 + rng.normal(0, 50.0, n))  # steep negative tail
+    fit = calib.fit_affine(d.reshape(64, 64), h.reshape(64, 64))
+    assert fit.ransac_scale > 0.0
+    assert fit.ols_scale < 0.0
+    assert fit.scale < 0.0
+    assert "ransac_sign_disagreement" in fit.calibration_warning
+
+
+def test_low_relief_guard_zeroes_tiny_scale_and_records_pre_guard_slopes():
+    """sparse_17 shape: RANSAC+OLS agree on a tiny slope against a mostly-flat
+    plateau with scattered ravines; the low-relief guard must return the flat
+    degenerate fit (scale 0, median offset) while still recording the two
+    pre-guard candidate slopes for the audit trail."""
+    rng = np.random.default_rng(9)
+    d = rng.uniform(0, 1, (64, 128))
+    h = 1200.0 + rng.normal(0, 3.0, d.shape)
+    ravine = rng.random(d.shape) < 0.25
+    h[ravine] -= 300.0 * rng.random(int(ravine.sum()))
+    fit = calib.fit_affine(d, h)
+    assert fit.degenerate is True
+    assert fit.method == "degenerate_low_relief"
+    assert fit.scale == 0.0
+    assert fit.calibration_warning == "near_zero_scale"
+    assert fit.ransac_scale is not None and fit.ols_scale is not None
+    assert calib.degenerate_reason(fit) is not None
+
+
+@pytest.mark.skipif(not _PIX2PIX_PREDICTIONS.is_dir(),
+                    reason="cached pix2pix benchmark predictions not present")
+def test_seven_flip_tiles_replay_reproducibly():
+    """Lock the diagnosed flip set against the real cached float32 predictions
+    (2026-10-16 diagnostics): six sign-reconciliation tiles and one low-relief
+    guard tile. Replaying the current fit_affine must be deterministic and
+    reproduce the documented signs/degeneracy - if RANSAC, sklearn or the
+    reconciliation logic drifts, this fails loudly."""
+    import rasterio
+
+    tiles_root = REPO_ROOT / "training_data"
+    expected = {
+        "forested_10": "reconciliation-negative", "forested_11": "reconciliation-negative",
+        "hilly_07": "reconciliation-positive", "hilly_16": "reconciliation-positive",
+        "sparse_01": "reconciliation-positive", "sparse_02": "reconciliation-positive",
+        "sparse_17": "degenerate",
+    }
+    for tile_id, kind in expected.items():
+        npy = _PIX2PIX_PREDICTIONS / f"{tile_id}_relative.npy"
+        dem_paths = list(tiles_root.rglob(f"{tile_id}_dem.tif"))
+        if not npy.is_file() or not dem_paths:
+            pytest.skip(f"cached benchmark data for {tile_id} not present")
+        rdsm = np.load(npy)
+        with rasterio.open(dem_paths[0]) as src:
+            dem = src.read(1).astype("float64")
+            nodata = src.nodata
+        assert rdsm.shape == dem.shape
+        valid = np.isfinite(rdsm) & np.isfinite(dem)
+        if nodata is not None and np.isfinite(nodata):
+            valid &= dem != nodata
+        d = np.where(valid, rdsm, np.nan)
+        h = np.where(valid, dem, np.nan)
+        fit = calib.fit_affine(d, h)
+        if kind == "degenerate":
+            assert fit.degenerate is True
+            assert fit.method == "degenerate_low_relief"
+            assert fit.calibration_warning == "near_zero_scale"
+        else:
+            assert fit.degenerate is False
+            assert "ransac_sign_disagreement" in fit.calibration_warning
+            assert (fit.scale < 0.0) == kind.endswith("negative")
+        # determinism: a repeated fit on identical inputs is bit-identical
+        assert calib.fit_affine(d, h).scale == fit.scale

@@ -162,6 +162,10 @@ def evaluate_prediction_truth(relative_depth: np.ndarray, dem: np.ndarray, *,
         "scale_sign": None,
         "polarity_inverted": None,
         "polarity_reason": None,
+        # Pre-decision slopes of the scheme-selection step (additive, see
+        # calibration.CalibrationFit.ransac_scale / ols_scale).
+        "calibration_ransac_scale": None,
+        "calibration_ols_scale": None,
     }
 
     # No variance on either side => neither an affine calibration nor a
@@ -232,6 +236,8 @@ def evaluate_prediction_truth(relative_depth: np.ndarray, dem: np.ndarray, *,
             "calibration_warning": fit.calibration_warning,
             "calibration_scale": fit.scale,
             "calibration_offset": fit.offset,
+            "calibration_ransac_scale": fit.ransac_scale,
+            "calibration_ols_scale": fit.ols_scale,
         }
 
     # Score ONLY the held-out 20% - the calibration was fit on the other 80%.
@@ -278,6 +284,8 @@ def evaluate_prediction_truth(relative_depth: np.ndarray, dem: np.ndarray, *,
         "calibration_warning": fit.calibration_warning,
         "calibration_scale": fit.scale,
         "calibration_offset": fit.offset,
+        "calibration_ransac_scale": fit.ransac_scale,
+        "calibration_ols_scale": fit.ols_scale,
         "raw_correlation_signed": raw_held_corr,
         "scale_sign": "+" if fit.scale >= 0 else "-",
         "polarity_inverted": fit.polarity_inverted,
