@@ -52,7 +52,8 @@ def test_local_override_bypasses_cache(monkeypatch):
     calls = {"n": 0}
     data = np.ones((4, 4), dtype="float32")
     monkeypatch.setattr(dem_source, "_fetch_opentopo", _fake_fetch(data, calls))
-    monkeypatch.setattr(dem_source, "_local_dem", lambda: data)
+    monkeypatch.setattr(dem_source, "_local_dem", lambda: (
+        data, {"source": "local", "crs": _CRS, "transform": None, "width": 4, "height": 4}))
 
     out, meta = dem_source.fetch_reference_dem(_BOUNDS, _CRS)
 

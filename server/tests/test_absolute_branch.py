@@ -162,3 +162,28 @@ def test_validation_scores_held_out_not_all_pixels(geo_environment, monkeypatch)
     assert data["bias"] == pytest.approx(float(np.mean(held_pred - fit.held_reference)))
     assert data["prediction_std"] == pytest.approx(float(np.std(held_pred)))
     assert data["reference_std"] == pytest.approx(float(np.std(fit.held_reference)))
+
+
+def test_validation_carries_estimate_status_and_inliers(geo_environment, monkeypatch):
+    """/validate must surface the derived trust level of the persisted fit and
+    the RANSAC inlier count, never leaving a flagged calibration to read as a
+    clean metric result."""
+    from app.schemas import ValidationResponse
+
+    upload, true_elev = geo_environment
+    monkeypatch.setattr(depth, "infer_relative_dsm", _fake_rdsm)
+    job = db.create_job(upload["id"], "absolute_dsm")
+    jobs._run_job(job["id"])
+    assert db.get_job(job["id"])["status"] == "done"
+
+    res = db.get_result_by_job(job["id"])
+    fit = calib.load_fit(Path(res["heightmap_path"]).parent / "held_out.npz")
+    assert fit is not None
+
+    data = jobs.run_validation(job["id"])
+    assert data["estimate_status"] == fit.estimate_status
+    assert data["calibration_inlier_count"] == fit.n_inliers
+    # this fixture is a near-constant prediction: flagged, not "ok"
+    assert data["estimate_status"] == "low_confidence"
+    # every field the route forwards must fit the response schema
+    ValidationResponse(**data)

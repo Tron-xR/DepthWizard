@@ -20,27 +20,44 @@ class DemFetchError(DepthWizardError):
     error_code = "dem_fetch_error"
 
 
-def _local_dem() -> Optional[np.ndarray]:
-    """Return (data, meta) from a locally-configured GeoTIFF if set."""
-    path = os.environ.get("DEPTHWIZARD_DEM_FILE")
-    if not path:
-        return None
+def _nanify_nodata(arr: np.ndarray, nodata) -> np.ndarray:
+    """In-place: declared raster nodata pixels become NaN (float32 array)."""
+    if nodata is not None and np.isfinite(nodata):
+        arr[arr == nodata] = np.nan
+    return arr
+
+
+def _read_local_geotiff(path: str) -> tuple:
+    """Read a local GeoTIFF as (data float32, meta) with its OWN georeferencing.
+
+    The file's CRS/transform travel with the array so calibration can reproject
+    it onto the working grid instead of array-resizing it blind. Declared
+    nodata pixels become NaN so the mask survives end to end.
+    """
     import rasterio
 
     with rasterio.open(path) as src:
-        data = src.read(1).astype("float32")
-    return data
+        data = _nanify_nodata(src.read(1).astype("float32"), src.nodata)
+        meta = {
+            "source": "local",
+            "crs": str(src.crs) if src.crs else None,
+            "transform": src.transform,
+            "width": src.width,
+            "height": src.height,
+        }
+    return data, meta
 
 
-def _local_calibration_dem() -> Optional[np.ndarray]:
+def _local_dem() -> Optional[tuple]:
+    """(data, meta) from a locally-configured GeoTIFF (DEPTHWIZARD_DEM_FILE)."""
+    path = os.environ.get("DEPTHWIZARD_DEM_FILE")
+    return _read_local_geotiff(path) if path else None
+
+
+def _local_calibration_dem() -> Optional[tuple]:
     """Calibration-only local GeoTIFF (DEPTHWIZARD_CALIBRATION_DEM_FILE)."""
     path = os.environ.get("DEPTHWIZARD_CALIBRATION_DEM_FILE")
-    if not path:
-        return None
-    import rasterio
-
-    with rasterio.open(path) as src:
-        return src.read(1).astype("float32")
+    return _read_local_geotiff(path) if path else None
 
 
 def fetch_calibration_reference_dem(bounds: list, crs: str,
@@ -57,13 +74,7 @@ def fetch_calibration_reference_dem(bounds: list, crs: str,
     """
     local = _local_calibration_dem()
     if local is not None:
-        return local, {
-            "source": "local",
-            "crs": crs,
-            "width": local.shape[1],
-            "height": local.shape[0],
-            "transform": None,
-        }
+        return local
     return fetch_reference_dem(bounds, crs, source=source, dem_type=dem_type,
                                use_cache=use_cache)
 
@@ -89,13 +100,13 @@ def _ref_cache_path(bounds: list, crs: str, source: str, dem_type: str) -> Path:
     return config.CACHE_DIR / "ref_dems" / f"{digest}.npz"
 
 
-def _cache_meta(ref_source: str, crs: str, shape: tuple) -> dict:
+def _cache_meta(ref_source: str, crs: str, shape: tuple, transform=None) -> dict:
     return {
         "source": ref_source,
         "crs": crs,
         "width": shape[1],
         "height": shape[0],
-        "transform": None,
+        "transform": transform,
         "cached": True,
     }
 
@@ -113,22 +124,26 @@ def fetch_reference_dem(bounds: list, crs: str,
     # is never shadowed by a stale cached tile.
     local = _local_dem()
     if local is not None:
-        # Reuse local array; caller is responsible for resampling/geolocation.
-        return local, {
-            "source": "local",
-            "crs": crs,
-            "width": local.shape[1],
-            "height": local.shape[0],
-            "transform": None,
-        }
+        # The override carries its own CRS/transform; callers reproject it.
+        return local
 
     if use_cache:
         npz = _ref_cache_path(bounds, crs, source, dem_type)
         if npz.is_file():
+            from rasterio.transform import Affine
+
             with np.load(npz) as z:
                 data = z["data"].astype("float32")
                 ref_source = str(z["source"].item()) if "source" in z.files else source
-            return data, _cache_meta(ref_source, crs, data.shape)
+                dem_crs = str(z["dem_crs"].item()) if "dem_crs" in z.files else crs
+                transform = None
+                if "transform" in z.files:
+                    # Caches written before the transform was persisted load as
+                    # None and fall back to the array-resize path.
+                    v = np.asarray(z["transform"], dtype="float64")
+                    if v.size == 6 and np.isfinite(v).all():
+                        transform = Affine(*[float(x) for x in v])
+            return data, _cache_meta(ref_source, dem_crs, data.shape, transform)
 
     data, meta = _fetch_opentopo(bounds, crs, dem_type)
 
@@ -136,8 +151,13 @@ def fetch_reference_dem(bounds: list, crs: str,
         try:
             npz = _ref_cache_path(bounds, crs, source, dem_type)
             npz.parent.mkdir(parents=True, exist_ok=True)
+            t = meta.get("transform")
+            transform_arr = np.asarray([t.a, t.b, t.c, t.d, t.e, t.f], dtype="float64") \
+                if t is not None else np.full(6, np.nan)
             np.savez_compressed(npz, data=data.astype("float32"),
-                                source=np.asarray(meta.get("source", source)))
+                                source=np.asarray(meta.get("source", source)),
+                                dem_crs=np.asarray(str(meta.get("crs") or "")),
+                                transform=transform_arr)
         except Exception:
             # Cache is best-effort: a write failure must never break the fetch.
             pass
@@ -186,7 +206,8 @@ def _fetch_opentopo(bounds: list, crs: str, dem_type: str) -> tuple:
     try:
         with MemoryFile(resp.content) as mem:
             with mem.open() as src:
-                data = src.read(1).astype("float32")
+                data = _nanify_nodata(
+                    src.read(1).astype("float32"), src.nodata)
                 meta = {
                     "source": dem_type,
                     "crs": str(src.crs),
@@ -290,8 +311,9 @@ def _fetch_copernicus_aws(lonmin, latmin, lonmax, latmax) -> tuple:
                 row0 = int(math.floor(w.row_off))
                 col1 = int(math.ceil(w.col_off + w.width))
                 row1 = int(math.ceil(w.row_off + w.height))
-                arr = src.read(1, window=((row0, row1), (col0, col1)),
-                               boundless=True).astype("float32")
+                arr = _nanify_nodata(
+                    src.read(1, window=((row0, row1), (col0, col1)),
+                             boundless=True).astype("float32"), src.nodata)
                 # geographic origin of the (col0,row0) corner of the window
                 t = src.transform
                 win_tr = Affine(t.a, t.b, t.c + t.a * col0 + t.b * row0,

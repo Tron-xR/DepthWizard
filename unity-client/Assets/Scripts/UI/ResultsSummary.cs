@@ -148,6 +148,11 @@ namespace DepthWizard.UI
                 Row("Reference std", r.hasReferenceStd, r.reference_std, "F3", "m"),
                 Row("Calibration scale", r.hasCalibrationScale, r.calibration_scale, "F3", ""),
                 Row("Calibration offset", r.hasCalibrationOffset, r.calibration_offset, "F2", "m"),
+                // Derived trust level + raw warning kinds ("negative_scale",
+                // "prediction_near_constant", "too_few_inliers", ...). Rows show
+                // "--" when the server sent none, so older servers stay readable.
+                TextRow("Estimate status", r.hasEstimateStatus, r.estimate_status),
+                TextRow("Calibration warning", r.hasCalibrationWarning, r.calibration_warning),
                 // Uncalibrated-model polarity trio: the calibrated Pearson r above
                 // is flipped positive when the fit's scale is negative, so it cannot
                 // distinguish a genuine +r from a masked negative raw correlation.

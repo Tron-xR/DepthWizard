@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
@@ -11,6 +12,7 @@ from fastapi.responses import FileResponse, Response
 from . import config, db, jobs
 from .errors import DepthWizardError
 from .pipeline import uploader, depth, evaluation, artifacts, exporter
+from .pipeline import calibration as calib
 from .schemas import (
     ErrorResponse,
     EvaluationResponse,
@@ -175,6 +177,19 @@ def _georeferenced_dsm_result(job_id: str) -> tuple:
     return job, res, db.get_upload(job["upload_id"])
 
 
+def _estimate_status_for(res: dict) -> Optional[str]:
+    """Derived calibration trust level of a job's persisted fit.
+
+    Read from held_out.npz (the same fit /validate reports): "ok" /
+    "low_confidence" / "failed". None for relative jobs or legacy jobs without
+    a persisted fit, so export tags stay empty rather than guessing.
+    """
+    if not res.get("dsm_geotiff_path"):
+        return None
+    fit = calib.load_fit(Path(res["heightmap_path"]).parent / "held_out.npz")
+    return fit.estimate_status if fit is not None else None
+
+
 @router.get("/export-dsm/{job_id}")
 def export_dsm(job_id: str) -> FileResponse:
     """Downloadable GeoTIFF of a job's real DSM (absolute/georeferenced branch).
@@ -196,6 +211,7 @@ def export_dsm(job_id: str) -> FileResponse:
             model=depth.model_identifier(),
             min_elev=res.get("min_elev"),
             max_elev=res.get("max_elev"),
+            estimate_status=_estimate_status_for(res),
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=ErrorResponse(error="dsm_export_failed", message=f"DSM export failed: {e}").model_dump())
@@ -224,6 +240,7 @@ def export_dem(job_id: str) -> FileResponse:
             model=depth.model_identifier(),
             min_elev=res.get("min_elev"),
             max_elev=res.get("max_elev"),
+            estimate_status=_estimate_status_for(res),
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=ErrorResponse(error="dem_export_failed", message=f"DEM export failed: {e}").model_dump())
@@ -358,6 +375,8 @@ async def evaluate(image: UploadFile = File(...),
                                      "total_pixels", "held_out_pixel_count",
                                      "calibration_status", "calibration_warning",
                                      "calibration_scale", "calibration_offset",
+                                     "estimate_status", "calibration_inlier_count",
+                                     "bias", "prediction_std", "reference_std",
                                      "raw_correlation_signed", "scale_sign",
                                      "polarity_inverted", "polarity_reason"}}
         try:

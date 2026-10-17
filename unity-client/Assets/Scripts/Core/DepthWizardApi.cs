@@ -83,6 +83,11 @@ namespace DepthWizard.Core
         public float bias;
         public float prediction_std;
         public float reference_std;
+        // Derived calibration trust level from the server: "ok" |
+        // "low_confidence" (valid fit carrying warnings) | "failed"
+        // (degenerate fit). Empty when absent (legacy job / older server).
+        public string estimate_status;
+        public string calibration_warning;
         [System.NonSerialized] public bool hasRawCorrelation;
         [System.NonSerialized] public bool hasPolarityInverted;
         [System.NonSerialized] public bool hasPolarityReason;
@@ -93,6 +98,8 @@ namespace DepthWizard.Core
         [System.NonSerialized] public bool hasPredictionStd;
         [System.NonSerialized] public bool hasReferenceStd;
         [System.NonSerialized] public bool hasBackend;
+        [System.NonSerialized] public bool hasEstimateStatus;
+        [System.NonSerialized] public bool hasCalibrationWarning;
     }
 
     [Serializable]
@@ -230,6 +237,8 @@ namespace DepthWizard.Core
                     resp.hasPredictionStd = HasNonNullField(body, "prediction_std");
                     resp.hasReferenceStd = HasNonNullField(body, "reference_std");
                     resp.hasBackend = HasNonNullField(body, "backend");
+                    resp.hasEstimateStatus = HasNonNullField(body, "estimate_status");
+                    resp.hasCalibrationWarning = HasNonNullField(body, "calibration_warning");
                 }
                 onSuccess?.Invoke(resp);
             }
