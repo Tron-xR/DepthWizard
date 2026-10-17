@@ -83,6 +83,9 @@ desktop.ini
 *.md
 !README.md
 !docs/PROJECT_DOCUMENTATION.md
+!docs/benchmarks/**
+!docs/CHANGELOG.md
+!docs/DATA_SOURCES.md
 opencode.json
 AGENTS.md
 server/DEPLOYMENT.md
