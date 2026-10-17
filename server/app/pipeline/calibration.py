@@ -56,12 +56,9 @@ _WARN_NEAR_ZERO_SCALE = "near_zero_scale"
 _WARN_INSUFFICIENT_VARIANCE = "insufficient_variance"
 _WARN_RANSAC_SIGN_DISAGREEMENT = "ransac_sign_disagreement"
 _WARN_LARGE_SCALE = "scale_too_large"
-# Inlier-support guard: RANSAC inliers are the pixels the fitted line actually
-# explains; a fit supported by fewer than this fraction of the TRAINING pixels
-# describes a small sub-population (extrapolation, not calibration).
-# ponytail: fixed 10% heuristic. Upgrade path: keep the supported fraction on
-# the fit and let the UI render support confidence instead of a warning flag.
-_MIN_INLIER_FRACTION = 0.10
+# Inlier-support guard (config.CALIB_MIN_INLIER_FRACTION, documented there):
+# RANSAC inliers are the pixels the fitted line actually explains; a fit
+# supported by too few of the TRAINING pixels describes a small sub-population.
 _WARN_FEW_INLIERS = "too_few_inliers"
 
 # Model-polarity threshold on the TRAIN-split raw correlation (relative depth
@@ -115,11 +112,12 @@ class CalibrationFit:
         Derived from the health fields (never stored, so a reloaded fit cannot
         drift): "failed" = degenerate fit with no usable scale/offset;
         "low_confidence" = numerically valid but carries >=1 warning;
-        "ok" = valid fit, no warnings.
+        "valid" = healthy fit, no warnings. ("relative" never appears on a
+        fit: it is the status of non-georeferenced evaluations with no fit.)
         """
         if self.degenerate:
             return "failed"
-        return "low_confidence" if self.calibration_warning else "ok"
+        return "low_confidence" if self.calibration_warning else "valid"
 
 
 def fit_affine(relative_d: np.ndarray, reference_h: np.ndarray) -> CalibrationFit:
@@ -293,7 +291,7 @@ def fit_affine(relative_d: np.ndarray, reference_h: np.ndarray) -> CalibrationFi
         warnings.append(_WARN_NEAR_CONSTANT)
     if relief > 0.0 and pred_span > _HIGH_RELIEF_FRACTION * relief:
         warnings.append(_WARN_LARGE_SCALE)
-    if n_inliers < _MIN_INLIER_FRACTION * d_train.size:
+    if n_inliers < config.CALIB_MIN_INLIER_FRACTION * d_train.size:
         warnings.append(_WARN_FEW_INLIERS)
     warning = "; ".join(warnings) if warnings else None
     status = "warning" if warning else "valid"

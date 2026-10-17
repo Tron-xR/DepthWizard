@@ -18,8 +18,12 @@ analyze:
 
 probe:
     Fresh inference (GPU) on a few tiles: DA2-small backbone depth statistics
-    at native resolution, clamp(0,50) effect on the head, and the same-area
-    256-crop scale comparison. Writes probe.json into the analyze run dir.
+    at native resolution (predicted_depth comes out at a 14-multiple size,
+    e.g. 714² for a 720² input), clamp(0,50) effect on the head, the
+    production-mirror LANCZOS resize of the head output back to native size,
+    and the same-area 256-crop training-scale comparison (depth value
+    distribution shifts strongly with input size). Writes probe.json into the
+    analyze run dir.
 
 Writes ONLY into a NEW dir: benchmark_runs/<commit7>_generalization_audit_<utc>Z/
 
@@ -84,10 +88,14 @@ def _pearson(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def _phase_randomize(arr: np.ndarray, rng) -> np.ndarray:
-    """Same power spectrum, random phases: null field with no alignment."""
+    """Same magnitude spectrum, random phases: null field with no alignment.
+
+    Phases come from FFT-ing a random real field, so the DC/Nyquist bins stay
+    real (the null keeps the original mean level) and the output is exactly
+    real."""
     f = np.fft.rfft2(arr)
-    ph = np.exp(2j * np.pi * rng.rand(*f.shape))
-    return np.fft.irfft2(f * ph, s=arr.shape)
+    ph = np.fft.rfft2(rng.rand(*arr.shape))
+    return np.fft.irfft2(np.abs(f) * np.exp(1j * np.angle(ph)), s=arr.shape)
 
 
 def _lowpass(a: np.ndarray) -> np.ndarray:
@@ -498,13 +506,30 @@ def probe(run_dir: Path, tiles: list[str]) -> dict:
             depc = backend.model(pixel_values=pvc.unsqueeze(0)).predicted_depth
             out_crop = backend.head(depc.clamp(0, 50))[0, 0].cpu().numpy().astype("float32")
 
+        from PIL import Image as PILImage
+
+        cdem = dem[cy - 128:cy + 128, cx - 128:cx + 128]
+        head_shape = list(out_noclamp.shape)
+
+        def _to_native(arr, size):
+            if arr.shape == size:
+                return arr
+            return np.asarray(PILImage.fromarray(arr).resize((size[1], size[0]),
+                                                            PILImage.LANCZOS),
+                              dtype="float32")
+
+        # mirror _FinetunedDepthBackend: head output resized back to native size
+        out_noclamp = _to_native(out_noclamp, (h, w))
+        out_clamp = _to_native(out_clamp, (h, w))
+        out_crop = _to_native(out_crop, cdem.shape)
+
         d = dep.detach().cpu().numpy().ravel()
         dc = depc.detach().cpu().numpy().ravel()
         valid = np.isfinite(dem)
-        cdem = dem[cy - 128:cy + 128, cx - 128:cx + 128]
         results[t] = {
             "shape": [h, w],
             "backbone_depth_shape": list(dep.shape[-2:]),
+            "head_output_shape": head_shape,
             "backbone_depth_native": {
                 "min": float(d.min()), "max": float(d.max()),
                 "mean": float(d.mean()), "p1": float(np.percentile(d, 1)),

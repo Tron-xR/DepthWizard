@@ -9,8 +9,9 @@ Invariants pinned here:
   - a reference DEM is reprojected onto the exact working grid from its own
     CRS/transform, with the shape-only resize kept only as the no-georef
     fallback;
-  - calibration exposes a derived estimate_status (ok / low_confidence /
-    failed) plus the RANSAC inlier count, on both /validate and /evaluate;
+  - calibration exposes a derived estimate_status (valid / low_confidence /
+    failed, "relative" when there is no DEM georeferencing) plus the RANSAC
+    inlier count, on both /validate and /evaluate;
   - export_geotiff round-trips CRS/transform/bounds/nodata.
 """
 import numpy as np
@@ -69,6 +70,49 @@ def test_downsample_keeps_footprint_float32_and_nodata(tmp_path):
     x_src = (np.arange(10, 1000) + 0.5) * orig_w / 1024 - 0.5
     expected = np.interp(x_src, np.arange(orig_w), ramp_cols)
     assert np.max(np.abs(interior - expected[None, :])) < 0.05
+
+
+def test_downsample_masks_nan_and_nodata():
+    orig_h, orig_w = 1200, 1500
+    ramp_cols = np.linspace(100.0, 200.0, orig_w, dtype="float32")
+    arr = np.tile(ramp_cols, (orig_h, 1))[None].copy()
+    arr[0, 100:400, 200:500] = np.nan         # NaN block (source px)
+    arr[0, 700:1000, 900:1200] = -9999.0      # declared-nodata block
+
+    out, _ = uploader._downsample_array(arr, 1024, nodata=-9999.0)
+    band, sy, sx = out[0], out.shape[1] / orig_h, out.shape[2] / orig_w
+    assert out.dtype == np.float32
+
+    # invalid regions resample as the DECLARED nodata value (kept numeric) and
+    # stay confined to their mapped source footprint + half-pixel rim
+    invalid = band == -9999.0
+    assert np.isnan(band).sum() == 0
+    assert invalid[int(250 * sy), int(350 * sx)] and invalid[int(850 * sy), int(1050 * sx)]
+    rows = np.where(invalid[:, int(350 * sx)])[0]
+    assert rows.min() >= int(100 * sy) - 1 and rows.max() <= int(400 * sy) + 1
+    cols = np.where(invalid[int(250 * sy), :])[0]
+    assert cols.min() >= int(200 * sx) - 1 and cols.max() <= int(500 * sx) + 1
+    rows2 = np.where(invalid[:, int(1050 * sx)])[0]
+    assert rows2.min() >= int(700 * sy) - 1 and rows2.max() <= int(1000 * sy) + 1
+    cols2 = np.where(invalid[int(850 * sy), :])[0]
+    assert cols2.min() >= int(900 * sx) - 1 and cols2.max() <= int(1200 * sx) + 1
+    assert not invalid[277:474].any() and not invalid[:, 345:610].any()
+
+    # valid pixels are the weighted mean of VALID samples only: the ramp is
+    # reproduced to sub-quantization tolerance (no -9999 smearing)
+    row = band[350]
+    x_src = (np.arange(band.shape[1]) + 0.5) / sx - 0.5
+    expected = np.interp(x_src, np.arange(orig_w), ramp_cols)
+    assert np.max(np.abs(row - expected)) < 0.05
+
+    # without a declared nodata value NaN stays NaN (pipeline convention)
+    # instead of smearing into valid neighbours, while -9999 is just data
+    nband = uploader._downsample_array(arr, 1024)[0][0]
+    assert np.isnan(nband[int(250 * sy), int(350 * sx)])
+    assert not np.isnan(nband[int(850 * sy), int(1050 * sx)])
+    nrows, ncols = np.where(np.isnan(nband))
+    assert nrows.min() >= int(100 * sy) - 1 and nrows.max() <= int(400 * sy) + 1
+    assert ncols.min() >= int(200 * sx) - 1 and ncols.max() <= int(500 * sx) + 1
 
 
 def test_small_upload_keeps_transform_untouched(tmp_path):
@@ -186,7 +230,7 @@ def test_estimate_status_maps_health_to_three_levels(tmp_path):
 
     ok = calib.fit_affine(ramp, 5.0 + 10.0 * ramp)
     assert ok.calibration_warning is None
-    assert ok.estimate_status == "ok"
+    assert ok.estimate_status == "valid"
 
     flagged = calib.fit_affine(ramp, 120.0 - 100.0 * ramp)
     assert flagged.calibration_warning is not None
@@ -221,6 +265,11 @@ def test_too_few_inliers_warns(monkeypatch):
     assert fit.calibration_warning == "too_few_inliers"
     assert fit.estimate_status == "low_confidence"
 
+    # the threshold is configuration (config.CALIB_MIN_INLIER_FRACTION),
+    # not a magic number inside the fit
+    monkeypatch.setattr(calib.config, "CALIB_MIN_INLIER_FRACTION", 0.0)
+    assert calib.fit_affine(ramp, 5.0 + 10.0 * ramp).calibration_warning is None
+
 
 # ---- /evaluate surface ----------------------------------------------------- #
 def test_evaluate_exposes_status_stats_and_schema():
@@ -229,16 +278,17 @@ def test_evaluate_exposes_status_stats_and_schema():
     ramp = np.linspace(0, 1, 32 * 32).reshape(32, 32).astype("float64")
     res = ev.evaluate_prediction_truth(ramp, 5.0 + 10.0 * ramp, mode="calibrated")
 
-    assert res["estimate_status"] == "ok"
+    assert res["estimate_status"] == "valid"
     assert res["calibration_inlier_count"] is not None
     assert res["bias"] == pytest.approx(0.0, abs=1e-6)
     assert res["prediction_std"] == pytest.approx(res["reference_std"], rel=1e-3)
     EvaluationResponse(**res)  # the response route forwards every field
 
-    # branches without a fit stay None instead of fabricating a status
+    # non-georeferenced evaluations report the "relative" taxonomy status;
+    # uncallibratable absolute branches stay None instead of fabricating one
     rel = ev.evaluate_prediction_truth(np.ones((16, 16)),
                                        np.linspace(0, 50, 256).reshape(16, 16),
                                        mode="relative")
-    assert rel["estimate_status"] is None
+    assert rel["estimate_status"] == "relative"
     assert rel["bias"] is None
     assert rel["calibration_inlier_count"] is None

@@ -149,7 +149,7 @@ def _export_tags(*, job_id: str, input_filename: str, backend: str, model: str,
         "VERTICAL_EXAGGERATION": "none",
         "MIN_ELEVATION_M": f"{min_elev:.6g}" if min_elev is not None else "",
         "MAX_ELEVATION_M": f"{max_elev:.6g}" if max_elev is not None else "",
-        # Calibration trust level of the surface in this file ("ok" /
+        # Calibration trust level of the surface in this file ("valid" /
         # "low_confidence" / "failed"); "" for legacy/relative jobs. A
         # low-confidence DSM must never travel as an unqualified result.
         "ESTIMATE_STATUS": estimate_status or "",

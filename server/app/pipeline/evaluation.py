@@ -26,6 +26,10 @@ Built here as the canonical helpers:
 """
 from __future__ import annotations
 
+import csv
+import hashlib
+import json
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -142,6 +146,10 @@ def evaluate_prediction_truth(relative_depth: np.ndarray, dem: np.ndarray, *,
     pred_v = relative_depth[valid]
     truth_v = dem[valid]
 
+    # Non-georeferenced evaluation: report the taxonomy status directly even on
+    # the early-return branches (constant-prediction etc.) below.
+    relative_mode = mode != "calibrated"
+
     base = {
         "valid_pixels": n_valid,
         "total_pixels": total_pixels,
@@ -158,7 +166,7 @@ def evaluate_prediction_truth(relative_depth: np.ndarray, dem: np.ndarray, *,
         "calibration_warning": None,
         "calibration_scale": None,
         "calibration_offset": None,
-        "estimate_status": None,
+        "estimate_status": "relative" if relative_mode else None,
         "calibration_inlier_count": None,
         "bias": None,
         "prediction_std": None,
@@ -380,3 +388,512 @@ def render_height_comparison(rgb: np.ndarray, truth: np.ndarray,
 
     path.parent.mkdir(parents=True, exist_ok=True)
     canvas.save(path, "PNG")
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 benchmark harness: manifest -> arms -> per-tile/site/stratum stats.
+#
+# One CLI:  python -m app.pipeline.evaluation benchmark \
+#               --manifest data/manifest.csv --split test --out results/
+#
+# Protocol (thresholds live in config/acceptance.yaml, frozen up front):
+#   - splits are assigned per SITE (region), never per tile; the manifest
+#     loader refuses a site that appears in two splits and warns when tiles of
+#     different splits sit within --guard-km of each other;
+#   - the affine calibration is fit ONLY on a checkerboard of contiguous
+#     spatial blocks and scored ONLY on the complement eroded by a guard band,
+#     so no evaluated pixel helped fit the scale/offset;
+#   - a random-pixel split is reported alongside as a within-scene diagnostic
+#     (optimistic by construction; never the headline number);
+#   - all arms share ONE valid-pixel mask per tile (intersection across the
+#     available arms) so their errors are paired and comparable;
+#   - raw (pre-calibration) correlations keep an explicit reason when they are
+#     undefined - never coerced to 0; failed/low_confidence tiles stay in every
+#     count;
+#   - aggregation is site-weighted (mean over site means) and bootstrap CIs
+#     resample SITES, not pixels.
+# ---------------------------------------------------------------------------
+
+_MANIFEST_REQUIRED_COLUMNS = (
+    "tile_id", "site_id", "region", "split", "sensor", "gsd", "crs",
+    "reference_product", "reference_type", "reference_res_m",
+    "vertical_datum", "stratum",
+)
+_MANIFEST_OPTIONAL_COLUMNS = (
+    "capture_date", "reference_hr_path", "notes", "bounds_wgs84",
+)
+_MANIFEST_COLUMNS = _MANIFEST_REQUIRED_COLUMNS + _MANIFEST_OPTIONAL_COLUMNS
+_BENCHMARK_SPLITS = ("train", "val", "test")
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_DEFAULT_PREDICTION_RUNS = {
+    "pix2pix": "benchmark_runs/c3a2841_pix2pix_20261016T134335Z",
+    "finetuned": "benchmark_runs/c3a2841_finetuned_20261016T134947Z",
+    "imele": "benchmark_runs/c3a2841_imele_20261016T155949Z",
+    "da2": "benchmark_runs/c3a2841_da2_20261016T162855Z",
+}
+
+
+class ManifestError(ValueError):
+    """The manifest cannot be used as-is (structural or leakage problem)."""
+
+
+def load_manifest(path, *, guard_km: float = 10.0) -> tuple:
+    """Read + validate the benchmark manifest. Returns (rows, validation).
+
+    Raises ManifestError when the manifest is structurally unusable or a SITE
+    appears in more than one split (tile-level leakage by construction).
+    Cross-split tiles closer than guard_km come back as warnings: they taint
+    the provenance, so the report records them instead of hiding them.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise ManifestError(f"manifest not found: {path}")
+    with path.open("r", encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh)
+        header = reader.fieldnames or []
+        rows = []
+        for raw in reader:
+            row = {k: (v or "").strip() for k, v in raw.items() if k is not None}
+            if any(row.values()):
+                rows.append(row)
+    missing = [c for c in _MANIFEST_REQUIRED_COLUMNS if c not in header]
+    if missing:
+        raise ManifestError(f"manifest {path} is missing columns: {missing}")
+    if not rows:
+        raise ManifestError(f"manifest {path} has no tile rows")
+    validation = validate_manifest(rows, guard_km=guard_km)
+    if validation["errors"]:
+        raise ManifestError(
+            f"manifest {path} failed validation:\n  "
+            + "\n  ".join(validation["errors"]))
+    return rows, validation
+
+
+def validate_manifest(rows, *, guard_km: float = 10.0) -> dict:
+    """Structural + leakage validation of already-parsed manifest rows."""
+    errors: list = []
+    warnings: list = []
+    seen: dict = {}
+    site_splits: dict = {}
+    parsed_bounds: dict = {}
+    for i, row in enumerate(rows, start=2):
+        where = f"line {i} ({row.get('tile_id') or '?'})"
+        for col in _MANIFEST_REQUIRED_COLUMNS:
+            if not row.get(col):
+                errors.append(f"{where}: missing required column '{col}'")
+        tile_id = row.get("tile_id")
+        if tile_id:
+            if tile_id in seen:
+                errors.append(
+                    f"{where}: duplicate tile_id (already on line {seen[tile_id]})")
+            seen[tile_id] = i
+        split = row.get("split")
+        if split and split not in _BENCHMARK_SPLITS:
+            errors.append(f"{where}: split '{split}' not in {_BENCHMARK_SPLITS}")
+        elif split and row.get("site_id"):
+            site_splits.setdefault(row["site_id"], set()).add(split)
+        for col in ("gsd", "reference_res_m"):
+            try:
+                if float(row.get(col) or "") <= 0:
+                    raise ValueError
+            except ValueError:
+                errors.append(
+                    f"{where}: {col} must be a positive number, got {row.get(col)!r}")
+        bounds = row.get("bounds_wgs84")
+        if bounds:
+            try:
+                parsed = tuple(float(v) for v in bounds.split(","))
+                if len(parsed) != 4 or parsed[2] <= parsed[0] or parsed[3] <= parsed[1]:
+                    raise ValueError
+                parsed_bounds[tile_id] = parsed
+            except ValueError:
+                errors.append(
+                    f"{where}: bounds_wgs84 must be 'minx,miny,maxx,maxy'")
+    for site, splits in sorted(site_splits.items()):
+        if len(splits) > 1:
+            errors.append(
+                f"site '{site}' appears in multiple splits {sorted(splits)}: "
+                "splits are assigned per site, never per tile")
+    for a in range(len(rows)):
+        for b in range(a + 1, len(rows)):
+            ra, rb = rows[a], rows[b]
+            if ra.get("split") == rb.get("split"):
+                continue
+            ba = parsed_bounds.get(ra.get("tile_id"))
+            bb = parsed_bounds.get(rb.get("tile_id"))
+            if not ba or not bb:
+                continue
+            gap = _bounds_gap_km(ba, bb)
+            if gap < guard_km:
+                warnings.append(
+                    f"tiles {ra.get('tile_id')} ({ra.get('split')}) and "
+                    f"{rb.get('tile_id')} ({rb.get('split')}) are ~{gap:.1f} km "
+                    f"apart (< {guard_km:g} km guard): cross-split neighbourhood")
+    return {"errors": errors, "warnings": warnings}
+
+
+def _bounds_gap_km(a, b) -> float:
+    """Edge-to-edge gap (km) between two lon/lat rectangles, local planar."""
+    lat0 = (a[1] + a[3] + b[1] + b[3]) / 4.0
+    kx = 111.32 * np.cos(np.radians(lat0))
+    ky = 110.57
+    ax0, ay0, ax1, ay1 = a[0] * kx, a[1] * ky, a[2] * kx, a[3] * ky
+    bx0, by0, bx1, by1 = b[0] * kx, b[1] * ky, b[2] * kx, b[3] * ky
+    dx = max(0.0, ax0 - bx1, bx0 - ax1)
+    dy = max(0.0, ay0 - by1, by0 - ay1)
+    return float(np.hypot(dx, dy))
+
+
+def spatial_block_split(shape, *, block: int = 180, guard: int = 8) -> tuple:
+    """Checkerboard spatial-block split -> (calibration_mask, eval_mask).
+
+    Deterministic (no seed): blocks with (bi + bj) even are calibration, the
+    rest are evaluation, eroded by `guard` pixels so no evaluated pixel sits
+    within the guard band of a calibration pixel. Erosion treats the image
+    border as evaluable (border_value=1): only proximity to an actual
+    calibration block removes a pixel.
+    """
+    from scipy import ndimage
+
+    h, w = shape
+    bi = np.arange(h) // max(1, block)
+    bj = np.arange(w) // max(1, block)
+    calib_mask = ((bi[:, None] + bj[None, :]) % 2) == 0
+    eval_mask = ~calib_mask
+    if guard > 0:
+        col = np.ones((1, 2 * guard + 1), dtype=bool)
+        row = np.ones((2 * guard + 1, 1), dtype=bool)
+        eval_mask = ndimage.binary_erosion(eval_mask, structure=col, border_value=1)
+        eval_mask = ndimage.binary_erosion(eval_mask, structure=row, border_value=1)
+    return calib_mask, eval_mask
+
+
+def _resample_reference(dem, shape, *, georef=None, resampling: str = "cubic"):
+    """Coarse reference DEM on the evaluation grid (real reprojection path).
+
+    georef: (src_transform, src_crs, dst_transform, dst_crs) or None. Without
+    georeferencing the stored grids are ASSUMED pixel-aligned (the documented
+    fallback of align_dem_to_prediction); differing shapes then refuse to
+    guess. On the current manifest the reference and prediction share one
+    grid, so the reprojection is the identity - the path stays real for
+    reference products that are genuinely coarser.
+    """
+    if georef and all(part is not None for part in georef):
+        src_transform, src_crs, dst_transform, dst_crs = georef
+        from rasterio.warp import Resampling, reproject
+
+        method = {"cubic": Resampling.cubic, "nearest": Resampling.nearest}[resampling]
+        dst = np.empty(shape, dtype="float32")
+        reproject(
+            source=dem.astype("float32"), destination=dst,
+            src_transform=src_transform, src_crs=src_crs,
+            dst_transform=dst_transform, dst_crs=dst_crs,
+            resampling=method, dst_nodata=np.nan,
+        )
+        return dst
+    if dem.shape == shape:
+        return np.asarray(dem, dtype="float32")
+    raise ValueError(
+        f"reference grid {dem.shape} != evaluation grid {shape} and no "
+        "georeferencing was provided to resample it")
+
+
+def _arm_stats(pred, truth, mask) -> dict:
+    """MAE/RMSE/bias/Pearson of one arm over one pixel mask (NaN-safe)."""
+    n = int(np.count_nonzero(mask))
+    if n < 2:
+        return {"n": n, "mae": None, "rmse": None, "bias": None,
+                "correlation": None,
+                "correlation_reason": f"fewer than 2 valid pixels (n={n})"}
+    metrics = compute_metrics(pred[mask], truth[mask])
+    diff = pred[mask].astype("float64") - truth[mask].astype("float64")
+    return {"n": metrics["n"], "mae": metrics["mae"], "rmse": metrics["rmse"],
+            "bias": float(np.mean(diff)),
+            "correlation": metrics["correlation"],
+            "correlation_reason": metrics["correlation_reason"]}
+
+
+def _cap_mask(mask, cap: int, rng) -> np.ndarray:
+    """Deterministically subsample a boolean mask to at most `cap` pixels."""
+    total = int(np.count_nonzero(mask))
+    if total <= cap:
+        return mask
+    idx = np.flatnonzero(mask.ravel())
+    picked = rng.choice(idx, size=cap, replace=False)
+    out = np.zeros(mask.shape, dtype=bool)
+    out.ravel()[picked] = True
+    return out
+
+
+def _fit_on_mask(pred, dem, mask) -> tuple:
+    """calibration.fit_affine restricted to one pixel mask. (fit, error)."""
+    n = int(np.count_nonzero(mask))
+    if n < 16:
+        return None, f"fewer than 16 calibration pixels (n={n})"
+    try:
+        return calib.fit_affine(np.where(mask, pred, np.nan),
+                                np.where(mask, dem, np.nan)), None
+    except ValueError as exc:
+        return None, f"calibration fit failed: {exc}"
+
+
+def evaluate_tile_arrays(dem, predictions: dict, *, georef=None,
+                         block: int = 180, guard: int = 8,
+                         calib_cap: int = 2_000_000, seed: int = 42) -> dict:
+    """All arms of one tile on one shared valid-pixel mask.
+
+    predictions: {backend: float array expected on the reference grid}.
+    Backends whose grid does not match are skipped and recorded, never
+    silently broadcast. `georef` (src+stp transforms/CRS) drives the real
+    reference reprojection for the nearest/bicubic baselines.
+    """
+    dem = np.asarray(dem, dtype="float32")
+    shape = dem.shape
+    rng = np.random.default_rng(seed)
+
+    preds: dict = {}
+    skipped: dict = {}
+    for name, pred in predictions.items():
+        arr = np.asarray(pred, dtype="float32")
+        if arr.shape != shape:
+            skipped[name] = f"prediction grid {arr.shape} != reference grid {shape}"
+            continue
+        preds[name] = arr
+
+    ref_nearest = _resample_reference(dem, shape, georef=georef, resampling="nearest")
+    ref_cubic = _resample_reference(dem, shape, georef=georef, resampling="cubic")
+
+    valid = np.isfinite(dem) & np.isfinite(ref_nearest) & np.isfinite(ref_cubic)
+    for arr in preds.values():
+        valid = valid & np.isfinite(arr)
+
+    calib_mask, eval_mask = spatial_block_split(shape, block=block, guard=guard)
+    calib_px = calib_mask & valid
+    eval_px = eval_mask & valid
+
+    record = {
+        "shape": list(shape),
+        "n_valid": int(np.count_nonzero(valid)),
+        "n_calib_pixels": int(np.count_nonzero(calib_px)),
+        "n_eval_pixels": int(np.count_nonzero(eval_px)),
+        "reference": {
+            "nearest": _arm_stats(ref_nearest, dem, eval_px),
+            "bicubic": _arm_stats(ref_cubic, dem, eval_px),
+        },
+        "backends": {},
+        "skipped_backends": skipped,
+        "status": "ok" if np.any(eval_px) else "no_eval_pixels",
+    }
+
+    # Cap calibration pixels (deterministic by seed): the 3857 tiles have
+    # ~2.5M pixels each; fitting every one costs minutes for no accuracy gain.
+    calib_fit_px = _cap_mask(calib_px, calib_cap, rng)
+    bicubic_rmse = record["reference"]["bicubic"]["rmse"]
+
+    for name, pred in preds.items():
+        backend: dict = {"status": "ok"}
+        raw = _arm_stats(pred, dem, eval_px)
+        backend.update({
+            "raw_r": raw["correlation"], "raw_r_reason": raw["correlation_reason"],
+            "raw_mae": raw["mae"], "raw_rmse": raw["rmse"], "raw_bias": raw["bias"],
+        })
+        fit, fit_error = _fit_on_mask(pred, dem, calib_fit_px)
+        if fit is None:
+            backend.update({
+                "status": "calibration_error", "calibrated_reason": fit_error,
+                "cal_r": None, "cal_rmse": None, "cal_mae": None, "cal_bias": None,
+                "delta_vs_bicubic": None, "improvement_vs_bicubic": None,
+                "scale": None, "offset": None, "inliers": None, "warning": None,
+                "estimate_status": None, "polarity_inverted": None,
+            })
+        elif fit.degenerate:
+            backend.update({
+                "status": "failed", "calibrated_reason": calib.degenerate_reason(fit),
+                "cal_r": None, "cal_rmse": None, "cal_mae": None, "cal_bias": None,
+                "delta_vs_bicubic": None, "improvement_vs_bicubic": None,
+                "scale": fit.scale, "offset": fit.offset, "inliers": fit.n_inliers,
+                "warning": fit.calibration_warning,
+                "estimate_status": fit.estimate_status,
+                "polarity_inverted": fit.polarity_inverted,
+            })
+        else:
+            cal = _arm_stats(fit.scale * pred.astype("float64") + fit.offset, dem, eval_px)
+            delta = None
+            improvement = None
+            if cal["rmse"] is not None and bicubic_rmse is not None:
+                delta = cal["rmse"] - bicubic_rmse
+                if bicubic_rmse > 0:
+                    improvement = (bicubic_rmse - cal["rmse"]) / bicubic_rmse
+            backend.update({
+                "cal_r": cal["correlation"], "cal_rmse": cal["rmse"],
+                "cal_mae": cal["mae"], "cal_bias": cal["bias"],
+                "delta_vs_bicubic": delta, "improvement_vs_bicubic": improvement,
+                "scale": fit.scale, "offset": fit.offset, "inliers": fit.n_inliers,
+                "warning": fit.calibration_warning,
+                "estimate_status": fit.estimate_status,
+                "polarity_inverted": fit.polarity_inverted,
+                "calibrated_reason": None,
+            })
+        # Within-scene random-split diagnostic: same fit machinery, random
+        # pixels instead of spatial blocks - reported, never headlined.
+        random_fit_px = _cap_mask(valid, calib_cap, rng)
+        rnd_fit, rnd_error = _fit_on_mask(pred, dem, random_fit_px)
+        if rnd_fit is None or rnd_fit.degenerate:
+            backend.update({
+                "random_rmse": None, "random_r": None,
+                "random_reason": rnd_error or "degenerate calibration fit",
+            })
+        else:
+            rm = compute_metrics(rnd_fit.scale * rnd_fit.held_relative + rnd_fit.offset,
+                                 rnd_fit.held_reference)
+            backend.update({
+                "random_rmse": rm["rmse"], "random_r": rm["correlation"],
+                "random_reason": rm["correlation_reason"],
+            })
+        record["backends"][name] = backend
+    return record
+
+
+def _site_weighted(tiles, backend: str, key: str):
+    """Mean over site means (equal site weight, not equal pixel weight)."""
+    per_site: dict = {}
+    for t in tiles:
+        value = t.get("backends", {}).get(backend, {}).get(key)
+        if value is not None:
+            per_site.setdefault(t["site_id"], []).append(value)
+    site_means = [float(np.mean(v)) for v in per_site.values()]
+    return float(np.mean(site_means)) if site_means else None
+
+
+def _failure_stats(tiles, backend: str) -> dict:
+    """Tiles by arm usability; failed/low_confidence/no-metrics all count."""
+    counts = {"valid": 0, "low_confidence": 0, "failed": 0, "no_metrics": 0}
+    for t in tiles:
+        if t.get("status") != "ok":
+            counts["no_metrics"] += 1
+            continue
+        info = t.get("backends", {}).get(backend)
+        if info is None or info.get("cal_rmse") is None:
+            counts["failed" if info and info.get("status") == "failed" else "no_metrics"] += 1
+            continue
+        status = info.get("estimate_status")
+        if status == "valid":
+            counts["valid"] += 1
+        elif status == "low_confidence":
+            counts["low_confidence"] += 1
+        else:
+            counts["failed"] += 1
+    n = len(tiles) or 1
+    counts["failure_rate"] = (counts["low_confidence"] + counts["failed"]
+                              + counts["no_metrics"]) / n
+    return counts
+
+
+def _bootstrap_ci(values, *, iterations: int, seed: int) -> dict:
+    """Percentile CI over SITES (values are already site-level)."""
+    vals = np.asarray([v for v in values if v is not None], dtype="float64")
+    if vals.size == 0:
+        return {"mean": None, "ci_low": None, "ci_high": None,
+                "n_sites": 0, "iters": 0}
+    if vals.size < 2 or iterations <= 0:
+        return {"mean": float(vals.mean()), "ci_low": None, "ci_high": None,
+                "n_sites": int(vals.size), "iters": 0}
+    rng = np.random.default_rng(seed)
+    n = vals.size
+    means = np.array([vals[rng.integers(0, n, n)].mean() for _ in range(iterations)])
+    return {"mean": float(vals.mean()),
+            "ci_low": float(np.percentile(means, 2.5)),
+            "ci_high": float(np.percentile(means, 97.5)),
+            "n_sites": int(n), "iters": int(iterations)}
+
+
+def aggregate_records(tile_records, *, bootstrap_iters: int = 1000,
+                      seed: int = 42) -> dict:
+    """Site-weighted aggregates + failure counts + site-resampled CIs."""
+    backends = sorted({b for t in tile_records for b in t.get("backends", {})})
+    sites = sorted({t["site_id"] for t in tile_records})
+    strata = sorted({t["stratum"] for t in tile_records})
+
+    def site_values(tiles, backend, key):
+        per_site: dict = {}
+        for t in tiles:
+            value = t.get("backends", {}).get(backend, {}).get(key)
+            if value is not None:
+                per_site.setdefault(t["site_id"], []).append(value)
+        return {site: float(np.mean(v)) for site, v in per_site.items()}
+
+    def arm_summary(tiles, backend):
+        summary = {
+            "cal_rmse": _site_weighted(tiles, backend, "cal_rmse"),
+            "cal_mae": _site_weighted(tiles, backend, "cal_mae"),
+            "cal_bias": _site_weighted(tiles, backend, "cal_bias"),
+            "raw_r": _site_weighted(tiles, backend, "raw_r"),
+            "delta_vs_bicubic": _site_weighted(tiles, backend, "delta_vs_bicubic"),
+            "improvement_vs_bicubic": _site_weighted(tiles, backend,
+                                                     "improvement_vs_bicubic"),
+            "n_tiles": len(tiles),
+            "n_sites": len({t["site_id"] for t in tiles}),
+            "failures": _failure_stats(tiles, backend),
+        }
+        return summary
+
+    overall_arms = {b: arm_summary(tile_records, b) for b in backends}
+    per_stratum = {}
+    for stratum in strata:
+        tiles = [t for t in tile_records if t["stratum"] == stratum]
+        per_stratum[stratum] = {
+            "n_tiles": len(tiles),
+            "n_sites": len({t["site_id"] for t in tiles}),
+            "arms": {b: arm_summary(tiles, b) for b in backends},
+        }
+    per_site = {}
+    for site in sites:
+        tiles = [t for t in tile_records if t["site_id"] == site]
+        entry = {
+            "stratum": tiles[0]["stratum"],
+            "split": tiles[0]["split"],
+            "n_tiles": len(tiles),
+            "arms": {b: arm_summary(tiles, b) for b in backends},
+        }
+        per_site[site] = entry
+
+    available = [b for b, s in overall_arms.items() if s["cal_rmse"] is not None]
+    primary = min(available, key=lambda b: overall_arms[b]["cal_rmse"]) if available else None
+
+    def reference_metric(name):
+        per_site: dict = {}
+        for t in tile_records:
+            value = t.get("reference", {}).get(name, {}).get("rmse")
+            if value is not None:
+                per_site.setdefault(t["site_id"], []).append(value)
+        site_means = [float(np.mean(v)) for v in per_site.values()]
+        return float(np.mean(site_means)) if site_means else None
+
+    bootstrap = {}
+    for b in backends:
+        if b not in available:
+            continue
+        bootstrap[b] = {
+            "cal_rmse": _bootstrap_ci(site_values(tile_records, b, "cal_rmse").values(),
+                                      iterations=bootstrap_iters, seed=seed),
+            "delta_vs_bicubic": _bootstrap_ci(
+                site_values(tile_records, b, "delta_vs_bicubic").values(),
+                iterations=bootstrap_iters, seed=seed),
+            "raw_r": _bootstrap_ci(site_values(tile_records, b, "raw_r").values(),
+                                   iterations=bootstrap_iters, seed=seed),
+        }
+    return {
+        "n_tiles": len(tile_records),
+        "n_sites": len(sites),
+        "arms": overall_arms,
+        "reference": {
+            "nearest_rmse": reference_metric("nearest"),
+            "bicubic_rmse": reference_metric("bicubic"),
+            "note": "reference arms score the stored coarse DEM against itself "
+                    "on the shared mask; nonzero only where grids differ",
+        },
+        "per_stratum": per_stratum,
+        "per_site": per_site,
+        "primary_arm": primary,
+        "bootstrap": bootstrap,
+    }

@@ -29,6 +29,16 @@ RELATIVE_ELEVATION_RANGE_M: float = float(os.environ.get("DEPTHWIZARD_RELIEF_M",
 MIN_RELATIVE_STD: float = max(
     float(os.environ.get("DEPTHWIZARD_MIN_RELATIVE_STD", "0.05")), 1e-9
 )
+# Calibration inlier-support threshold: a RANSAC fit supported by fewer than
+# this FRACTION of its training pixels describes a small sub-population
+# (extrapolation, not calibration), warned as "too_few_inliers" by
+# calibration.fit_affine. Documented here (not inline) so the API, exports,
+# and the benchmark harness all read one value.
+# ponytail: fixed 10% heuristic. Upgrade path: keep the supported fraction on
+# the fit and let the UI render support confidence instead of a warning flag.
+CALIB_MIN_INLIER_FRACTION: float = float(
+    os.environ.get("DEPTHWIZARD_CALIB_MIN_INLIER_FRACTION", "0.10")
+)
 # Depth backbone. The pix2pix GAN SavedModel is the default backend when present
 # (models/pix2pix in the repo root); set DEPTHWIZARD_TF_MODEL to a different
 # SavedModel, or set it to an empty string to force the transformers/HF

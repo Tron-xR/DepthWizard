@@ -180,9 +180,10 @@ def _georeferenced_dsm_result(job_id: str) -> tuple:
 def _estimate_status_for(res: dict) -> Optional[str]:
     """Derived calibration trust level of a job's persisted fit.
 
-    Read from held_out.npz (the same fit /validate reports): "ok" /
-    "low_confidence" / "failed". None for relative jobs or legacy jobs without
-    a persisted fit, so export tags stay empty rather than guessing.
+    Read from held_out.npz (the same fit /validate reports): "valid" /
+    "low_confidence" / "failed". Relative jobs never reach this helper (DSM
+    export requires a georeferenced result); legacy jobs without a persisted
+    fit return None so export tags stay empty rather than guessing.
     """
     if not res.get("dsm_geotiff_path"):
         return None
