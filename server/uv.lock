@@ -175,6 +175,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "fastapi" },
     { name = "filelock" },
+    { name = "fiona" },
     { name = "numpy" },
     { name = "pillow" },
     { name = "pydantic" },
@@ -203,6 +204,7 @@ dev = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.110" },
     { name = "filelock", specifier = ">=3.13" },
+    { name = "fiona", specifier = ">=1.10.1" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pillow", specifier = ">=10.0" },
     { name = "pydantic", specifier = ">=2.6" },
@@ -261,6 +263,25 @@ source = { registry = "https://download.pytorch.org/whl/cu124" }
 sdist = { url = "https://files.pythonhosted.org/packages/7d/64/a02e6765de08964ed371eca577870593245afc9dfac16d037de7c10d18e6/filelock-3.32.3.tar.gz", hash = "sha256:0ffa185a3540854c95caa7fa76b76cb219d907415e2c5dc9af25fd970563487f" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a7/8e/50f46a9c0ce8d2861a394c1347caae037ea0431d2f67d7feb151cbc4649a/filelock-3.32.3-py3-none-any.whl", hash = "sha256:7f0ca4bcc0e181c60dbbd8aa9ab5b120ebb99e4e064e83636340056f833a1f09" },
+]
+
+[[package]]
+name = "fiona"
+version = "1.10.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "attrs" },
+    { name = "certifi" },
+    { name = "click" },
+    { name = "click-plugins" },
+    { name = "cligj" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/51/e0/71b63839cc609e1d62cea2fc9774aa605ece7ea78af823ff7a8f1c560e72/fiona-1.10.1.tar.gz", hash = "sha256:b00ae357669460c6491caba29c2022ff0acfcbde86a95361ea8ff5cd14a86b68", size = 444606, upload-time = "2024-09-16T20:15:47.074Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d0/34/c7e681703db8f8509907ebe6326c5b4fd933f8ae9a7d3ab7a51e507f230e/fiona-1.10.1-cp310-cp310-macosx_10_15_x86_64.whl", hash = "sha256:6e2a94beebda24e5db8c3573fe36110d474d4a12fac0264a3e083c75e9d63829", size = 16143634, upload-time = "2024-09-16T20:14:20.089Z" },
+    { url = "https://files.pythonhosted.org/packages/3c/2c/7f1968ecc17350db3c87d0feb59852ea50e7d8688a63659879d92badf90a/fiona-1.10.1-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:fc7366f99bdc18ec99441b9e50246fdf5e72923dc9cbb00267b2bf28edd142ba", size = 14750325, upload-time = "2024-09-16T20:14:23.762Z" },
+    { url = "https://files.pythonhosted.org/packages/75/cb/73805030100447d40408c8a0f63ec146fb2b6e82692d0c194655c28b6783/fiona-1.10.1-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:8c32f424b0641c79f4036b96c2e80322fb181b4e415c8cd02d182baef55e6730", size = 17294868, upload-time = "2024-09-16T20:14:26.847Z" },
+    { url = "https://files.pythonhosted.org/packages/ca/a3/57d33c2f16a2a6b27911d83301a697ed1491dca48d2f1dd2ed3b58a66244/fiona-1.10.1-cp310-cp310-win_amd64.whl", hash = "sha256:9a67bd88918e87d64168bc9c00d9816d8bb07353594b5ce6c57252979d5dc86e", size = 24480225, upload-time = "2024-09-16T20:14:30.749Z" },
 ]
 
 [[package]]
