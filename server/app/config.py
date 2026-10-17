@@ -60,6 +60,16 @@ IMELE_MODEL_PATH: str = os.environ.get("DEPTHWIZARD_IMELE_MODEL", "")
 # Fourth backend: fine-tuned DA2-small + trained decoder head checkpoint
 # (produced by decoder_training/train_decoder.py). Opt-in only.
 FINETUNED_MODEL_PATH: str = os.environ.get("DEPTHWIZARD_FINETUNED_MODEL", "")
+# DA3 (Depth Anything 3) backbones: strictly opt-in, one env var per size
+# (value = HF repo id or local snapshot dir; empty = disabled). Setting more
+# than one is an error (depth._selected_da3), so "which model ran" is never
+# ambiguous. Licences: SMALL/BASE/MONO-LARGE are Apache-2.0; LARGE/GIANT are
+# CC BY-NC 4.0 (non-commercial use only).
+DA3_SMALL_MODEL: str = os.environ.get("DEPTHWIZARD_DA3_SMALL_MODEL", "")
+DA3_BASE_MODEL: str = os.environ.get("DEPTHWIZARD_DA3_BASE_MODEL", "")
+DA3MONO_LARGE_MODEL: str = os.environ.get("DEPTHWIZARD_DA3MONO_LARGE_MODEL", "")
+DA3_LARGE_MODEL: str = os.environ.get("DEPTHWIZARD_DA3_LARGE_MODEL", "")
+DA3_GIANT_MODEL: str = os.environ.get("DEPTHWIZARD_DA3_GIANT_MODEL", "")
 
 # Optional prediction-artifact export root. Artifacts are written ONLY when a
 # request opts in (e.g. /evaluate?save_artifacts=true), under

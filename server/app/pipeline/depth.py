@@ -28,6 +28,37 @@ class DepthModelError(DepthWizardError):
     error_code = "depth_model_error"
 
 
+# DA3 (Depth Anything 3) opt-in backends: (slug, config attribute, default HF
+# repo id). Default is off (all config values empty); the deployment opts in by
+# setting exactly one DEPTHWIZARD_DA3_*_MODEL env var to an HF repo id or a
+# local snapshot directory. Licences: SMALL/BASE/MONO-LARGE Apache-2.0;
+# LARGE/GIANT CC BY-NC 4.0 (non-commercial). The tool/eval CLI uses the
+# defaults below when no --model-path override is given.
+DA3_BACKENDS = (
+    ("da3-small", "DA3_SMALL_MODEL", "depth-anything/DA3-SMALL"),
+    ("da3-base", "DA3_BASE_MODEL", "depth-anything/DA3-BASE"),
+    ("da3mono-large", "DA3MONO_LARGE_MODEL", "depth-anything/DA3MONO-LARGE"),
+    ("da3-large", "DA3_LARGE_MODEL", "depth-anything/DA3-LARGE-1.1"),
+    ("da3-giant", "DA3_GIANT_MODEL", "depth-anything/DA3-GIANT-1.1"),
+)
+
+
+def _selected_da3():
+    """(slug, model_id) of the single configured DA3 backend, or None.
+
+    More than one configured is an error: five silently-mixable candidates
+    would make "which model actually ran" unanswerable from the artifacts.
+    """
+    selected = [(slug, getattr(config, attr))
+                for slug, attr, _ in DA3_BACKENDS if getattr(config, attr)]
+    if len(selected) > 1:
+        raise DepthModelError(
+            "multiple DA3 backends configured ("
+            + ", ".join(slug for slug, _ in selected)
+            + "): set exactly one DEPTHWIZARD_DA3_*_MODEL env var or none")
+    return selected[0] if selected else None
+
+
 def get_depth_model() -> Optional[object]:
     """Return the cached model/pipeline or None if unavailable."""
     return _model_cache.get("model")
@@ -47,6 +78,8 @@ def backend_slug() -> str:
             return "pix2pix"
         if name == "_ImeleModelBackend":
             return "imele"
+        if name == "_Da3ModelBackend":
+            return model.slug
         if name == "_FinetunedDepthBackend":
             return "finetuned"
         return "depth_anything"
@@ -54,6 +87,9 @@ def backend_slug() -> str:
         return "finetuned"
     if config.IMELE_MODEL_PATH:
         return "imele"
+    da3 = _selected_da3()
+    if da3 is not None:
+        return da3[0]
     if config.TF_MODEL_PATH:
         return "pix2pix"
     return "depth_anything"
@@ -65,6 +101,9 @@ def model_identifier() -> str:
         return config.FINETUNED_MODEL_PATH
     if config.IMELE_MODEL_PATH:
         return config.IMELE_MODEL_PATH
+    da3 = _selected_da3()
+    if da3 is not None:
+        return da3[1]
     if config.TF_MODEL_PATH:
         return config.TF_MODEL_PATH
     return config.DEFAULT_DEPTH_MODEL
@@ -223,12 +262,102 @@ class _FinetunedDepthBackend:
         return {"depth": dem}
 
 
+class _Da3ModelBackend:
+    """Depth Anything 3 (opt-in) adapter: DA3-SMALL/BASE/MONO-LARGE/LARGE/GIANT.
+
+    Output convention: DA3's ``Prediction.depth`` is z-depth (larger = farther
+    from the camera). Verified against the upstream code: the GLB exporter
+    unprojects ``point = depth * ray(z=1)`` and the metric helper scales
+    ``depth * focal / 300``. The harness convention, established by the DA2/HF
+    adapter above (inverse depth -> inverted), is rDSM increasing with
+    camera-to-ground distance, which a z-depth map already satisfies, so
+    ``invert_depth = False`` for every DA3 size. That is the documented, fixed
+    per-model rule decided from the model's definition - never chosen per tile
+    or per result. The harness separately reports raw_r_opposite, so a wrong
+    family-level call stays visible without silently switching signs.
+
+    Depth comes back on DA3's processed grid (long side 504 by default), not
+    the native tile grid; infer_relative_dsm resamples it (LANCZOS), exactly
+    like the DA2/HF arm - process_res is deliberately left at the library
+    default (no tuning on the test split). Imported lazily so servers without
+    a configured DA3 backend never import torch or the DA3 package.
+    """
+    invert_depth = False
+
+    def __init__(self, slug: str, model_id: str):
+        import torch
+
+        from depth_anything_3.api import DepthAnything3
+
+        self.slug = slug
+        self.model_id = model_id
+        self.device = torch.device("cuda" if torch.cuda.is_available()
+                                   else "cpu")
+        self._model = DepthAnything3.from_pretrained(model_id).to(self.device)
+
+    def __call__(self, pil):
+        import torch
+
+        rgb = np.asarray(pil.convert("RGB"), dtype="uint8")
+        with torch.no_grad():
+            prediction = self._model.inference([rgb])
+        depth = np.asarray(prediction.depth, dtype="float32")
+        if depth.ndim == 3:  # (N,H,W) -> (H,W)
+            depth = depth[0]
+        return {"depth": depth}
+
+
+def da3_checkpoint_provenance(model_id: str) -> dict:
+    """Pinned weight provenance for one DA3 checkpoint.
+
+    ``model_id`` is an HF repo id (resolved through the local HF cache via
+    huggingface_hub, which downloads only missing files) or a local snapshot
+    directory (the offline path). Returns ``repo_id``, ``revision`` (the hub
+    commit sha the snapshot is pinned to - not a mutable branch name),
+    ``weight_file`` and ``weight_sha256`` so a run names the exact bytes it
+    scored. Raises DepthModelError when no weight file exists (an empty
+    provenance must fail loudly, not degrade to "unknown").
+    """
+    import hashlib
+    from pathlib import Path
+
+    p = Path(model_id)
+    if p.is_dir():
+        snapshot, repo_id, revision = (p, model_id, None)
+    else:
+        from huggingface_hub import snapshot_download
+
+        snapshot = Path(snapshot_download(model_id))
+        repo_id, revision = model_id, snapshot.name
+    weights = sorted(snapshot.rglob("*.safetensors"))
+    if not weights:
+        raise DepthModelError(f"no .safetensors weight found under {snapshot}")
+    weight = weights[0]
+    h = hashlib.sha256()
+    with open(weight, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return {
+        "repo_id": repo_id,
+        "revision": revision,
+        "snapshot": str(snapshot),
+        "weight_file": weight.name,
+        "weight_sha256": h.hexdigest(),
+    }
+
+
 def _load_model():
     if config.FINETUNED_MODEL_PATH:
         return _FinetunedDepthBackend(config.FINETUNED_MODEL_PATH)
 
     if config.IMELE_MODEL_PATH:
         return _ImeleModelBackend(config.IMELE_MODEL_PATH)
+
+    # Configured DA3 outranks TF/HF: TF_MODEL_PATH is auto-discovered when
+    # models/pix2pix exists, so a DA3 opt-in must be checked before it.
+    da3 = _selected_da3()
+    if da3 is not None:
+        return _Da3ModelBackend(*da3)
 
     if config.TF_MODEL_PATH:
         return _TfSavedModel(config.TF_MODEL_PATH)

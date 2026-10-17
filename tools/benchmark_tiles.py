@@ -421,13 +421,41 @@ def cmd_inventory(args) -> int:
 # ---------------------------------------------------------------------------
 # model / env metadata
 # ---------------------------------------------------------------------------
+# Trivial control arms: prediction = image statistic, no model, no checkpoint.
+# They bound how much of a score raw intensity structure alone explains.
+_CONTROL_BACKENDS = ("brightness", "sobel")
+
+
+def _control_infer(kind: str):
+    def infer(rgb_hwc: np.ndarray) -> np.ndarray:
+        gray = np.asarray(rgb_hwc, dtype="float64").mean(axis=2)
+        if kind == "brightness":
+            out = gray
+        else:  # sobel: gradient magnitude of grayscale
+            gy, gx = np.gradient(gray)
+            out = np.hypot(gx, gy)
+        lo, hi = float(out.min()), float(out.max())
+        return ((out - lo) / (hi - lo)) if hi > lo else np.zeros_like(out)
+
+    return infer
+
+
+def _da3_map() -> dict:
+    """{slug: (config attribute, default HF id)} for the opt-in DA3 backends."""
+    from app.pipeline.depth import DA3_BACKENDS
+
+    return {slug: (attr, default) for slug, attr, default in DA3_BACKENDS}
+
+
 def _force_backend(backend: str, model_path: Optional[str]) -> None:
     from app import config
 
-    if backend == "auto":
+    if backend == "auto" or backend in _CONTROL_BACKENDS:
         return
     config.FINETUNED_MODEL_PATH = ""
     config.IMELE_MODEL_PATH = ""
+    for attr, _default in _da3_map().values():
+        setattr(config, attr, "")
     if backend == "pix2pix":
         if not config.TF_MODEL_PATH:
             raise SystemExit("--backend pix2pix: no SavedModel found (models/pix2pix missing?)")
@@ -445,19 +473,37 @@ def _force_backend(backend: str, model_path: Optional[str]) -> None:
         config.TF_MODEL_PATH = ""
     elif backend == "depth_anything":
         config.TF_MODEL_PATH = ""
+    elif backend in _da3_map():
+        attr, default = _da3_map()[backend]
+        setattr(config, attr, model_path or default)
+        config.TF_MODEL_PATH = ""
     else:
         raise SystemExit(f"unknown backend: {backend}")
 
 
 def _model_info(backend: str) -> dict:
+    if backend in _CONTROL_BACKENDS:
+        # no checkpoint bytes; the arm is fully pinned by its code (inference
+        # fingerprint) and slug
+        return {"slug": backend, "identifier": f"control:{backend}",
+                "file_sha256": {}}
+
     from app.pipeline import depth
 
     slug = depth.backend_slug()
     expected = {"pix2pix": "pix2pix", "imele": "imele", "finetuned": "finetuned",
-                "depth_anything": "depth_anything"}.get(backend)
+                "depth_anything": "depth_anything"}
+    expected.update({s: s for s in _da3_map()})
+    expected = expected.get(backend)
     if expected and slug != expected:
         raise RuntimeError(f"backend mismatch: asked for {backend}, loaded {slug}")
     ident = depth.model_identifier()
+    if backend in _da3_map():
+        # hub revision + weight sha256: a DA3 run names the exact bytes it used
+        prov = depth.da3_checkpoint_provenance(ident)
+        return {"slug": slug, "identifier": ident,
+                "file_sha256": {prov["weight_file"]: prov["weight_sha256"]},
+                "hf_repo_id": prov["repo_id"], "hf_revision": prov["revision"]}
     hashes = {}
     p = Path(ident)
     if p.is_file():
@@ -494,6 +540,9 @@ def _environment_info(seed: int) -> dict:
         info["cuda_available"] = torch.cuda.is_available()
         if torch.cuda.is_available():
             info["gpu"] = torch.cuda.get_device_name(0)
+            # process-lifetime peak (one model per process): the run's VRAM cost
+            info["cuda_max_memory_allocated_mb"] = round(
+                torch.cuda.max_memory_allocated() / 1e6, 1)
         info["torch_deterministic_algorithms"] = torch.are_deterministic_algorithms_enabled()
     except Exception:  # noqa: BLE001
         pass
@@ -1296,6 +1345,16 @@ def _limitations(summary: dict) -> list:
     if backend == "imele":
         lim.append("IMELE's training corpus is not documented in this repository; overlap with "
                    "these tiles cannot be ruled out.")
+    if backend.startswith("da3"):
+        lim.append(f"{backend} is a general-purpose monocular-depth checkpoint; overlap of its "
+                   "training corpus with these tiles cannot be ruled out.")
+        if backend in ("da3-large", "da3-giant"):
+            lim.append(f"{backend} weights are CC BY-NC 4.0: non-commercial use only. "
+                       "da3-giant is additionally hardware-skipped here (1.15B params do not fit "
+                       "this box's 4 GB VRAM).")
+    if backend in _CONTROL_BACKENDS:
+        lim.append(f"{backend} control arm: predicts an image statistic (not depth); it bounds "
+                   "how much of a score trivial intensity structure alone explains.")
     if summary["protocol"] == "historical":
         lim.append("Legacy per-tile split shares pixels of the SAME tile between fit and "
                    "score (80/20 pixel split); adjacent tiles also share scenery. Not a "
@@ -1352,6 +1411,16 @@ def cmd_run(args) -> int:
         "inference_fingerprint": _inference_fingerprint(),
     }
 
+    # Load the model up front: fail fast when it cannot load, and measure the
+    # one-time load separately from per-tile inference (model_load_seconds).
+    model_load_seconds = 0.0
+    if args.backend not in _CONTROL_BACKENDS:
+        from app.pipeline import depth as depth_mod
+
+        t_load = time.time()
+        depth_mod.ensure_model()
+        model_load_seconds = round(time.time() - t_load, 1)
+
     git = _git_info()
     backend_short = {"auto": "auto", "depth_anything": "da2"}.get(args.backend, args.backend)
     started = datetime.now(timezone.utc)
@@ -1363,8 +1432,11 @@ def cmd_run(args) -> int:
         suffix += 1
     run_dir.mkdir(parents=True)
 
-    infer_fn = _default_infer
-    if args.backend == "auto":
+    infer_fn = _control_infer(args.backend) if args.backend in _CONTROL_BACKENDS else _default_infer
+    if args.backend in _CONTROL_BACKENDS:
+        print(f"note: --backend {args.backend} is a control arm (image statistic, not depth)",
+              file=sys.stderr)
+    elif args.backend == "auto":
         print("note: --backend auto uses the config dispatch order (see AGENTS.md)", file=sys.stderr)
 
     print(f"run dir: {run_dir}")
@@ -1413,6 +1485,7 @@ def cmd_run(args) -> int:
             "git": git,
             "started_utc": started.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "elapsed_seconds": round(elapsed, 1),
+            "model_load_seconds": model_load_seconds,
             "seed": args.seed,
             "root": _rel(root),
             "calibration_pixel_cap": args.calibration_pixel_cap,
@@ -1484,7 +1557,8 @@ def main() -> int:
     pr.add_argument("--protocol", required=True,
                     choices=["historical", "geographic", "local_calibration"])
     pr.add_argument("--backend", default="auto",
-                    choices=["auto", "pix2pix", "imele", "finetuned", "depth_anything"])
+                    choices=["auto", "pix2pix", "imele", "finetuned", "depth_anything"]
+                    + list(_CONTROL_BACKENDS) + list(_da3_map()))
     pr.add_argument("--model-path", default=None, help="override model/checkpoint path")
     pr.add_argument("--root", default=str(DEFAULT_ROOT))
     pr.add_argument("--run-root", default=str(DEFAULT_RUN_ROOT))

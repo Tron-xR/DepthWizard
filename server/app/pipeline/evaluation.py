@@ -810,6 +810,11 @@ def evaluate_tile_arrays(dem, predictions: dict, *, georef=None,
         raw = _arm_stats(pred, dem, eval_px)
         backend.update({
             "raw_r": raw["correlation"], "raw_r_reason": raw["correlation_reason"],
+            # Same arm under the opposite sign convention: an explicit, visible
+            # diagnostic for family-level inversion mistakes, never a silent
+            # per-tile sign choice.
+            "raw_r_opposite": (None if raw["correlation"] is None
+                               else -raw["correlation"]),
             "raw_mae": raw["mae"], "raw_rmse": raw["rmse"], "raw_bias": raw["bias"],
         })
         fit, fit_error = _fit_on_mask(pred, dem, calib_fit_px)
@@ -979,6 +984,7 @@ def aggregate_records(tile_records, *, bootstrap_iters: int = 1000,
             "cal_mae": _site_weighted(tiles, backend, "cal_mae"),
             "cal_bias": _site_weighted(tiles, backend, "cal_bias"),
             "raw_r": _site_weighted(tiles, backend, "raw_r"),
+            "raw_r_opposite": _site_weighted(tiles, backend, "raw_r_opposite"),
             "delta_vs_bicubic": _site_weighted(tiles, backend, "delta_vs_bicubic"),
             "improvement_vs_bicubic": _site_weighted(tiles, backend,
                                                      "improvement_vs_bicubic"),
@@ -1054,6 +1060,9 @@ def aggregate_records(tile_records, *, bootstrap_iters: int = 1000,
                                       iterations=bootstrap_iters, seed=seed),
             "raw_r": _bootstrap_ci(site_values(tile_records, b, "raw_r").values(),
                                    iterations=bootstrap_iters, seed=seed),
+            "raw_r_opposite": _bootstrap_ci(
+                site_values(tile_records, b, "raw_r_opposite").values(),
+                iterations=bootstrap_iters, seed=seed),
         }
         if priors:
             block["delta_vs_baseline"] = _bootstrap_ci(
@@ -1227,7 +1236,7 @@ def _fmt(value) -> str:
 _TILE_CSV_COLUMNS = (
     "tile_id", "site_id", "stratum", "split", "backend", "status", "n_eval_pixels",
     "reference_std",
-    "raw_r", "raw_r_reason", "raw_mae", "raw_rmse", "raw_bias",
+    "raw_r", "raw_r_opposite", "raw_r_reason", "raw_mae", "raw_rmse", "raw_bias",
     "cal_r", "cal_rmse", "cal_mae", "cal_bias", "scale", "offset", "inliers",
     "warning", "estimate_status", "calibrated_reason", "polarity_inverted",
     "delta_vs_bicubic", "improvement_vs_bicubic", "random_rmse", "random_r",
@@ -1303,10 +1312,12 @@ def _write_markdown(path: Path, payload) -> None:
         "",
         _md_table(
             ["arm", "cal RMSE (m)", "cal MAE (m)", "bias (m)", "raw r",
-             "delta vs baseline (m)", "improvement vs baseline", "skill vs const",
+             "raw r (opposite sign)", "delta vs baseline (m)",
+             "improvement vs baseline", "skill vs const",
              "valid/low/failed/no_metrics", "failure rate", "unusable rate"],
             [[name + (" *" if s.get("contaminated") else ""),
               s["cal_rmse"], s["cal_mae"], s["cal_bias"], s["raw_r"],
+              s["raw_r_opposite"],
               s["delta_vs_baseline"], s["improvement_vs_baseline"],
               s["skill_vs_const"],
               "{valid}/{low_confidence}/{failed}/{no_metrics}".format(
@@ -1340,10 +1351,15 @@ def _write_markdown(path: Path, payload) -> None:
             "",
             _md_table(
                 ["stratum", "tiles", "sites", "cal RMSE (m)", "raw r",
-                 "improvement vs baseline", "failure rate"],
+                 "raw r (opposite sign)", "improvement vs baseline",
+                 "skill vs const", "valid/low/failed/no_metrics", "failure rate"],
                 [[st, v["n_tiles"], v["n_sites"],
                   v["arms"][arm]["cal_rmse"], v["arms"][arm]["raw_r"],
+                  v["arms"][arm]["raw_r_opposite"],
                   v["arms"][arm]["improvement_vs_baseline"],
+                  v["arms"][arm]["skill_vs_const"],
+                  "{valid}/{low_confidence}/{failed}/{no_metrics}".format(
+                      **v["arms"][arm]["failures"]),
                   v["arms"][arm]["failures"]["failure_rate"]]
                  for st, v in agg["per_stratum"].items()]),
             "",
@@ -1351,9 +1367,10 @@ def _write_markdown(path: Path, payload) -> None:
             "",
             _md_table(
                 ["site", "stratum", "split", "tiles", "cal RMSE (m)", "raw r",
-                 "delta vs baseline (m)", "failure rate"],
+                 "raw r (opposite sign)", "delta vs baseline (m)", "failure rate"],
                 [[site, v["stratum"], v["split"], v["n_tiles"],
                   v["arms"][arm]["cal_rmse"], v["arms"][arm]["raw_r"],
+                  v["arms"][arm]["raw_r_opposite"],
                   v["arms"][arm]["delta_vs_baseline"],
                   v["arms"][arm]["failures"]["failure_rate"]]
                  for site, v in agg["per_site"].items()]),
