@@ -58,9 +58,13 @@ training_data/
 decoder_training/checkpoints/
 decoder_training/checkpoints_tmp/
 
-# Server cached outputs (runtime only; the benchmark manifest IS tracked)
+# Server cached outputs (runtime only; benchmark manifests and dataset
+# provenance IS tracked)
 server/data/*
 !server/data/manifest.csv
+!server/data/hr_sites.csv
+!server/data/manifest_hr.csv
+!server/data/hr_downloads.csv
 
 # Large test assets
 sample_images/
