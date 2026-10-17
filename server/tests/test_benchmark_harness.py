@@ -141,6 +141,8 @@ def test_failure_stats_count_failed_and_valid_tiles():
     assert failures["failed"] == 1
     assert failures["failure_rate"] == pytest.approx(1.0 / 3.0)
     assert failures["low_confidence_rate"] == pytest.approx(1.0 / 3.0)
+    assert failures["unusable_rate"] == pytest.approx(2.0 / 3.0)
+    assert failures["unusable_rate"] >= failures["failure_rate"]
 
 
 def test_bicubic_reference_uses_real_reprojection():

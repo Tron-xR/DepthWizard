@@ -907,6 +907,8 @@ def _failure_stats(tiles, backend: str) -> dict:
     n = len(tiles) or 1
     counts["failure_rate"] = (counts["failed"] + counts["no_metrics"]) / n
     counts["low_confidence_rate"] = counts["low_confidence"] / n
+    counts["unusable_rate"] = ((counts["failed"] + counts["no_metrics"]
+                                + counts["low_confidence"]) / n)
     return counts
 
 
@@ -1293,14 +1295,15 @@ def _write_markdown(path: Path, payload) -> None:
         _md_table(
             ["arm", "cal RMSE (m)", "cal MAE (m)", "bias (m)", "raw r",
              "delta vs baseline (m)", "improvement vs baseline", "skill vs const",
-             "valid/low/failed/no_metrics", "failure rate"],
+             "valid/low/failed/no_metrics", "failure rate", "unusable rate"],
             [[name + (" *" if s.get("contaminated") else ""),
               s["cal_rmse"], s["cal_mae"], s["cal_bias"], s["raw_r"],
               s["delta_vs_baseline"], s["improvement_vs_baseline"],
               s["skill_vs_const"],
               "{valid}/{low_confidence}/{failed}/{no_metrics}".format(
                   **s["failures"]),
-              s["failures"]["failure_rate"]]
+              s["failures"]["failure_rate"],
+              s["failures"]["unusable_rate"]]
              for name, s in agg["arms"].items()]),
         "",
     ]
@@ -1423,9 +1426,10 @@ def _write_markdown(path: Path, payload) -> None:
         "construction); headline numbers are spatial-block with guard band.")
     caveats.append(
         "failed / low_confidence tiles remain in every count; the failure rate "
-        "counts tiles that failed outright (degenerate fit or missing metrics), "
-        "while warning-carrying tiles are listed in the counts column and the "
-        "warning-count table above.")
+        "counts tiles that failed outright (degenerate fit or missing metrics) - "
+        "unusable_rate = (failed + no_metrics + low_confidence)/n is reported "
+        "beside it, while warning-carrying tiles are listed in the counts column "
+        "and the warning-count table above.")
     failed = sorted({t["tile_id"] for t in payload["tiles"]
                      if any((i or {}).get("status") in ("failed", "calibration_error")
                             for i in (t.get("backends") or {}).values())})
