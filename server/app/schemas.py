@@ -76,8 +76,10 @@ class ValidationResponse(BaseModel):
     calibration_scale: Optional[float] = None
     calibration_offset: Optional[float] = None
     # Coarse trust level DERIVED from the fit's health fields (never stored):
-    # "ok" | "low_confidence" (valid fit carrying any calibration_warning) |
-    # "failed" (degenerate fit). None for legacy jobs with no persisted fit.
+    # "valid" (healthy fit) | "low_confidence" (valid fit carrying any
+    # calibration_warning) | "failed" (degenerate fit); "relative" for
+    # non-georeferenced evaluations (no fit exists). None for legacy jobs with
+    # no persisted fit.
     estimate_status: Optional[str] = None
     # RANSAC inlier pixels supporting the fit (None when no fit ran). A tiny
     # count relative to the sample count means the scale extrapolates a small

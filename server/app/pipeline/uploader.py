@@ -89,8 +89,17 @@ def detect_georeferenced(meta: dict) -> bool:
     return bool(meta.get("crs") and (meta.get("transform") is not None or meta.get("bounds")))
 
 
-def _downsample_array(arr, max_dim: int) -> tuple:
-    """Downsample so the largest dimension <= max_dim. Returns (array, scale)."""
+def _downsample_array(arr, max_dim: int, nodata: Optional[float] = None) -> tuple:
+    """Downsample so the largest dimension <= max_dim. Returns (array, scale).
+
+    Float32-preserving resize (PIL "F" per band): quantizing the working raster
+    through uint8 would destroy the numeric values that later readers of the
+    upload rely on. NaN and declared-nodata pixels are resampled through a
+    SEPARATELY resized validity mask with weight normalization, so invalid
+    samples never smear into valid neighbours: majority-invalid output pixels
+    keep the declared nodata value (or stay NaN when none is declared), and
+    valid pixels are the weighted mean of VALID samples only.
+    """
     import numpy as np
 
     h, w = arr.shape[1], arr.shape[2]
@@ -101,14 +110,26 @@ def _downsample_array(arr, max_dim: int) -> tuple:
     scale = max_dim / largest
     new_w = max(1, int(round(w * scale)))
     new_h = max(1, int(round(h * scale)))
-    # Float32-preserving resize (PIL "F" per band): quantizing the working
-    # raster through uint8 would destroy the numeric values (and any declared
-    # nodata pixels) that later readers of the upload rely on.
-    bands = [
-        np.asarray(Image.fromarray(arr[c].astype("float32"), "F")
-                   .resize((new_w, new_h), Image.BILINEAR), dtype="float32")
-        for c in range(arr.shape[0])
-    ]
+    size = (new_w, new_h)
+    finite_nodata = nodata is not None and np.isfinite(nodata)
+    fill = float(nodata) if finite_nodata else np.nan
+    bands = []
+    for c in range(arr.shape[0]):
+        band = arr[c].astype("float32")
+        valid = np.isfinite(band)
+        if finite_nodata:
+            valid = valid & (band != nodata)
+        vals = np.asarray(
+            Image.fromarray(np.where(valid, band, 0.0), "F")
+            .resize(size, Image.BILINEAR), dtype="float32")
+        if valid.all():
+            bands.append(vals)
+            continue
+        weight = np.asarray(
+            Image.fromarray(valid.astype("float32"), "F")
+            .resize(size, Image.BILINEAR), dtype="float32")
+        out = np.where(weight >= 0.5, vals / np.maximum(weight, 1e-6), fill)
+        bands.append(out.astype("float32"))
     return np.stack(bands, axis=0), scale
 
 
@@ -162,7 +183,7 @@ def ingest_upload(file_bytes: bytes, filename: str) -> dict:
     notes = "as-is" if arr.shape[1] <= config.MAX_WORKING_DIM else "downsampled"
 
     # Downsample oversized images to the working resolution
-    working, _ = _downsample_array(arr, config.MAX_WORKING_DIM)
+    working, _ = _downsample_array(arr, config.MAX_WORKING_DIM, meta.get("nodata"))
     _write_working(dest, working, meta, is_geo, file_type)
 
     return {

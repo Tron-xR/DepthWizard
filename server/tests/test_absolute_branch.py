@@ -183,7 +183,7 @@ def test_validation_carries_estimate_status_and_inliers(geo_environment, monkeyp
     data = jobs.run_validation(job["id"])
     assert data["estimate_status"] == fit.estimate_status
     assert data["calibration_inlier_count"] == fit.n_inliers
-    # this fixture is a near-constant prediction: flagged, not "ok"
+    # this fixture is a near-constant prediction: flagged, not "valid"
     assert data["estimate_status"] == "low_confidence"
     # every field the route forwards must fit the response schema
     ValidationResponse(**data)

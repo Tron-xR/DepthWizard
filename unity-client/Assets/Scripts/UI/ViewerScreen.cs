@@ -456,6 +456,19 @@ namespace DepthWizard.UI
                             $"MAE: {resp.mae:F2} m\n" +
                             $"Correlation: {resp.correlation:F3} (not meaningful for flat terrain)";
                     }
+                    else if (resp.estimate_status == "failed")
+                    {
+                        // Degenerate fit reported through the status taxonomy
+                        // without the explicit degenerate_calibration flag
+                        // (legacy payloads / reloaded fits): treat the same as
+                        // flat terrain rather than showing confident metrics.
+                        _validationResultText.color = _warningColor;
+                        _validationResultText.text =
+                            $"Calibration failed \u2014 heights treated as flat\n" +
+                            $"RMSE: {resp.rmse:F2} m\n" +
+                            $"MAE: {resp.mae:F2} m\n" +
+                            $"Correlation: {resp.correlation:F3} (not meaningful)";
+                    }
                     else if (resp.estimate_status == "low_confidence")
                     {
                         // Valid fit but flagged (negative scale, near-constant

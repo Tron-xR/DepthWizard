@@ -26,9 +26,10 @@ from PIL import Image
 from rasterio.transform import from_origin
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(os.path.dirname(ROOT), "geo_test"))
-import download_dem  # noqa: E402
-import download_rgb  # noqa: E402
+# The geo_test scrapers are imported lazily in the fetch functions below so
+# this module stays importable without them (tools/benchmark_tiles.py only
+# needs grid/STRATA and must not require the scrapers at test time).
+sys.path.insert(0, os.path.join(ROOT, "geo_test"))
 
 OUT = os.path.join(ROOT, "training_data")
 LOG = os.path.join(OUT, "gather.log")
@@ -159,6 +160,8 @@ TERRARIUM_URL = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}
 
 
 def fetch_dem_tilezen(bbox, out_path, z=13):
+    import download_rgb
+
     w, s, e, n = bbox
     x0, x1, y0, y1 = download_rgb.tile_range((w, s, e, n), z)
     rows = []
@@ -185,6 +188,9 @@ def fetch_dem_tilezen(bbox, out_path, z=13):
 
 
 def main():
+    import download_dem
+    import download_rgb
+
     key = os.environ.get("OPENTOPO_API_KEY", "").strip()
     if not key:
         print("OPENTOPO_API_KEY not set; refusing to proceed.", file=sys.stderr)

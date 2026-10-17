@@ -53,6 +53,7 @@ __pycache__/
 # ML models & weights (too large for git)
 models/
 training_data/
+/geo_test_data/
 decoder_training/checkpoints/
 decoder_training/checkpoints_tmp/
 
