@@ -169,9 +169,17 @@ def _calibrate_absolute(rdsm: np.ndarray, upload: dict, meta: dict, result_dir: 
     if not bounds or not crs:
         raise ValueError("Georeferenced upload is missing bounds/CRS")
 
-    ref, _ = dem_source.fetch_calibration_reference_dem(bounds, crs)
-    if ref.shape[:2] != rdsm.shape:
-        ref = calib.resample_to_grid(ref, rdsm.shape)
+    ref, rmeta = dem_source.fetch_calibration_reference_dem(bounds, crs)
+    minx, miny, maxx, maxy = bounds
+    # Target = the EXACT working grid derived from the real bounds + raster
+    # shape; the source's own CRS/transform drive a true reprojection (never
+    # an array resize that assumes both grids already agree).
+    target_transform = from_origin(
+        minx, maxy,
+        (maxx - minx) / rdsm.shape[1],
+        (maxy - miny) / rdsm.shape[0],
+    )
+    ref = calib.resample_reference(ref, rmeta, rdsm.shape, crs, target_transform)
 
     fit = calib.fit_affine(rdsm, ref)
     abs_dsm = calib.apply_fit(rdsm, fit)
@@ -180,7 +188,6 @@ def _calibrate_absolute(rdsm: np.ndarray, upload: dict, meta: dict, result_dir: 
     # with POST /evaluate.
     calib.save_fit(fit, result_dir / "held_out.npz")
 
-    minx, miny, maxx, maxy = bounds
     cell_size = abs((maxx - minx) / rdsm.shape[1])
     if cell_size <= 0:
         cell_size = None
@@ -222,7 +229,8 @@ def run_validation(job_id: str, *, save_artifacts: bool = False) -> dict:
         pred_crs = str(src.crs) if src.crs else None
 
     ref, rmeta = dem_source.fetch_reference_dem(bounds, crs)
-    ref = calib.resample_to_grid(ref, pred.shape)
+    ref = calib.resample_reference(ref, rmeta, pred.shape, pred_crs or crs,
+                                   pred_transform)
 
     # Leak-proof calibration guarantee (same as POST /evaluate): score ONLY the
     # held-out 20% that fit_affine reserved during processing and persisted to
@@ -291,6 +299,8 @@ def run_validation(job_id: str, *, save_artifacts: bool = False) -> dict:
             "calibration_warning": calib_warning,
             "calibration_scale": calib_scale,
             "calibration_offset": (fit.offset if fit is not None else None),
+            "estimate_status": (fit.estimate_status if fit is not None else None),
+            "calibration_inlier_count": (fit.n_inliers if fit is not None else None),
             "raw_correlation_signed": raw_corr_signed,
             "scale_sign": scale_sign,
             "polarity_inverted": polarity_inverted,
@@ -348,6 +358,8 @@ def run_validation(job_id: str, *, save_artifacts: bool = False) -> dict:
         "calibration_warning": calib_warning,
         "calibration_scale": calib_scale,
         "calibration_offset": (fit.offset if fit is not None else None),
+        "estimate_status": (fit.estimate_status if fit is not None else None),
+        "calibration_inlier_count": (fit.n_inliers if fit is not None else None),
         "bias": bias,
         "prediction_std": prediction_std,
         "reference_std": reference_std,

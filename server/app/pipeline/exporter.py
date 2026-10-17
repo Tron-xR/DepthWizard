@@ -74,8 +74,13 @@ def export_texture(rgb: np.ndarray, path: Path) -> None:
     Image.fromarray(rgb8, "RGB").save(path, "PNG")
 
 
-def export_geotiff(elevation: np.ndarray, crs: str, transform, bounds, path: Path) -> None:
-    """Write a georeferenced DSM GeoTIFF with correct CRS/transform."""
+def export_geotiff(elevation: np.ndarray, crs: str, transform, bounds, path: Path,
+                   nodata=None) -> None:
+    """Write a georeferenced DSM GeoTIFF with correct CRS/transform.
+
+    nodata: optional GDAL nodata value so a masked surface (e.g. NaN or a
+    sentinel) survives the round trip instead of reading back as a real value.
+    """
     import rasterio
     from rasterio.transform import from_origin
 
@@ -89,6 +94,7 @@ def export_geotiff(elevation: np.ndarray, crs: str, transform, bounds, path: Pat
         "dtype": "float32",
         "crs": crs,
         "transform": transform,
+        "nodata": nodata,
     }
     with rasterio.open(path, "w", **profile) as dst:
         dst.write(elevation.astype("float32"), 1)
@@ -132,7 +138,8 @@ def _write_tagged_geotiff(data: np.ndarray, profile: dict, out_path: Path,
 
 
 def _export_tags(*, job_id: str, input_filename: str, backend: str, model: str,
-                 min_elev: Optional[float], max_elev: Optional[float]) -> dict:
+                 min_elev: Optional[float], max_elev: Optional[float],
+                 estimate_status: Optional[str] = None) -> dict:
     """Traceability tag set shared by DSM and DEM exports."""
     return {
         "MODEL": model,
@@ -142,12 +149,17 @@ def _export_tags(*, job_id: str, input_filename: str, backend: str, model: str,
         "VERTICAL_EXAGGERATION": "none",
         "MIN_ELEVATION_M": f"{min_elev:.6g}" if min_elev is not None else "",
         "MAX_ELEVATION_M": f"{max_elev:.6g}" if max_elev is not None else "",
+        # Calibration trust level of the surface in this file ("ok" /
+        # "low_confidence" / "failed"); "" for legacy/relative jobs. A
+        # low-confidence DSM must never travel as an unqualified result.
+        "ESTIMATE_STATUS": estimate_status or "",
     }
 
 
 def export_dsm_geotiff(source_tif: Path, out_path: Path, *, job_id: str,
                        input_filename: str, backend: str, model: str,
-                       min_elev: Optional[float], max_elev: Optional[float]) -> str:
+                       min_elev: Optional[float], max_elev: Optional[float],
+                       estimate_status: Optional[str] = None) -> str:
     """Write a downloadable, traceability-tagged copy of a job's real DSM.
 
     Re-uses the pipeline-written float32 GeoTIFF (its CRS/transform come from
@@ -165,14 +177,16 @@ def export_dsm_geotiff(source_tif: Path, out_path: Path, *, job_id: str,
         "SOURCE": "DepthWizard model-estimated DSM (NOT ground truth)",
         **_export_tags(job_id=job_id, input_filename=input_filename,
                        backend=backend, model=model,
-                       min_elev=min_elev, max_elev=max_elev),
+                       min_elev=min_elev, max_elev=max_elev,
+                       estimate_status=estimate_status),
     }
     return _write_tagged_geotiff(data, profile, out_path, tags)
 
 
 def export_dem_geotiff(source_tif: Path, out_path: Path, *, job_id: str,
                        input_filename: str, backend: str, model: str,
-                       min_elev: Optional[float], max_elev: Optional[float]) -> str:
+                       min_elev: Optional[float], max_elev: Optional[float],
+                       estimate_status: Optional[str] = None) -> str:
     """Write a downloadable bare-earth DEM GeoTIFF for a job's real DSM.
 
     Same source as export_dsm_geotiff (the archived float32 dsm.tif: CRS,
@@ -200,7 +214,8 @@ def export_dem_geotiff(source_tif: Path, out_path: Path, *, job_id: str,
         "FILTER": "progressive_morphological_filter(Zhang et al. 2003)",
         **_export_tags(job_id=job_id, input_filename=input_filename,
                        backend=backend, model=model,
-                       min_elev=min_elev, max_elev=max_elev),
+                       min_elev=min_elev, max_elev=max_elev,
+                       estimate_status=estimate_status),
     }
     return _write_tagged_geotiff(dem, profile, out_path, tags)
 

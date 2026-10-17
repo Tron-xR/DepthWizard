@@ -57,6 +57,7 @@ def load_raster(path: Path):
                     "width": src.width,
                     "height": src.height,
                     "count": src.count,
+                    "nodata": src.nodata,
                 }
             return data, meta
         except Exception as e:
@@ -100,15 +101,15 @@ def _downsample_array(arr, max_dim: int) -> tuple:
     scale = max_dim / largest
     new_w = max(1, int(round(w * scale)))
     new_h = max(1, int(round(h * scale)))
-    img = Image.fromarray(arr.transpose(1, 2, 0).astype("uint8") if arr.shape[0] == 3
-                          else arr[0].astype("uint8"), "RGB" if arr.shape[0] == 3 else "L")
-    img = img.resize((new_w, new_h), Image.BILINEAR)
-    out = np.asarray(img, dtype="float32")
-    if arr.shape[0] == 3:
-        out = out.transpose(2, 0, 1)
-    else:
-        out = out[None, :, :]
-    return out, scale
+    # Float32-preserving resize (PIL "F" per band): quantizing the working
+    # raster through uint8 would destroy the numeric values (and any declared
+    # nodata pixels) that later readers of the upload rely on.
+    bands = [
+        np.asarray(Image.fromarray(arr[c].astype("float32"), "F")
+                   .resize((new_w, new_h), Image.BILINEAR), dtype="float32")
+        for c in range(arr.shape[0])
+    ]
+    return np.stack(bands, axis=0), scale
 
 
 def _preview_rgb(arr) -> "np.ndarray":
@@ -183,10 +184,20 @@ def _write_working(path: Path, arr, meta: dict, is_geo: bool, file_type: str) ->
     h, w = arr.shape[1], arr.shape[2]
     if file_type == "tiff":
         import rasterio
-        from rasterio.transform import from_origin
+        from rasterio.transform import Affine, from_origin
 
         transform = meta.get("transform") if (is_geo and meta.get("transform") is not None) \
             else from_origin(0, h, 1, 1)
+        if is_geo and meta.get("transform") is not None:
+            # The working raster is a COARSER pixel grid than the upload:
+            # rescale the source affine by the downsample ratio so the file
+            # keeps the original footprint. Writing the source transform
+            # unchanged would relabel coarse pixels with the fine pixel size
+            # and shrink the footprint by the downsample ratio.
+            sx = (meta.get("width") or w) / float(w)
+            sy = (meta.get("height") or h) / float(h)
+            if sx != 1.0 or sy != 1.0:
+                transform = transform * Affine.scale(sx, sy)
         profile = {
             "driver": "GTiff",
             "height": h,
@@ -195,6 +206,7 @@ def _write_working(path: Path, arr, meta: dict, is_geo: bool, file_type: str) ->
             "dtype": "float32",
             "crs": meta.get("crs") if is_geo else None,
             "transform": transform,
+            "nodata": meta.get("nodata") if is_geo else None,
         }
         with rasterio.open(path, "w", **profile) as dst:
             dst.write(arr)

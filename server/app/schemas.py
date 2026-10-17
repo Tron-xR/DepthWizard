@@ -75,6 +75,14 @@ class ValidationResponse(BaseModel):
     calibration_warning: Optional[str] = None
     calibration_scale: Optional[float] = None
     calibration_offset: Optional[float] = None
+    # Coarse trust level DERIVED from the fit's health fields (never stored):
+    # "ok" | "low_confidence" (valid fit carrying any calibration_warning) |
+    # "failed" (degenerate fit). None for legacy jobs with no persisted fit.
+    estimate_status: Optional[str] = None
+    # RANSAC inlier pixels supporting the fit (None when no fit ran). A tiny
+    # count relative to the sample count means the scale extrapolates a small
+    # sub-population; surfaced via the too_few_inliers warning.
+    calibration_inlier_count: Optional[int] = None
     # Additive summary statistics over the SAME scored pixels as rmse/mae/
     # correlation (the persisted held-out 20%, or the whole grid for legacy
     # jobs): bias = mean(predicted - reference) (positive = model overpredicts,
@@ -115,6 +123,14 @@ class EvaluationResponse(BaseModel):
     calibration_warning: Optional[str] = None
     calibration_scale: Optional[float] = None
     calibration_offset: Optional[float] = None
+    # Same derived trust level / inlier count as ValidationResponse.
+    estimate_status: Optional[str] = None
+    calibration_inlier_count: Optional[int] = None
+    # Additive summary stats on the same held-out pixels as mae/rmse:
+    # bias = mean(prediction - reference), positive = model overpredicts.
+    bias: Optional[float] = None
+    prediction_std: Optional[float] = None
+    reference_std: Optional[float] = None
     # Model polarity / raw signed correlation (same semantics as ValidationResponse).
     raw_correlation_signed: Optional[float] = None
     scale_sign: Optional[str] = None

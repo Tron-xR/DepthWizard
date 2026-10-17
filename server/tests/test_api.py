@@ -224,6 +224,8 @@ def test_export_dsm_absolute(client, monkeypatch, tmp_path):
         assert tags["VERTICAL_EXAGGERATION"] == "none"
         assert tags["BACKEND"]
         assert tags["JOB_ID"] == job["id"]
+        # the calibration trust level of the surface travels in the artifact
+        assert tags["ESTIMATE_STATUS"] == "low_confidence"
 
 
 def test_dem_view_png_uses_float_dsm(tmp_path):

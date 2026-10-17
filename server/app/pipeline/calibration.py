@@ -56,6 +56,13 @@ _WARN_NEAR_ZERO_SCALE = "near_zero_scale"
 _WARN_INSUFFICIENT_VARIANCE = "insufficient_variance"
 _WARN_RANSAC_SIGN_DISAGREEMENT = "ransac_sign_disagreement"
 _WARN_LARGE_SCALE = "scale_too_large"
+# Inlier-support guard: RANSAC inliers are the pixels the fitted line actually
+# explains; a fit supported by fewer than this fraction of the TRAINING pixels
+# describes a small sub-population (extrapolation, not calibration).
+# ponytail: fixed 10% heuristic. Upgrade path: keep the supported fraction on
+# the fit and let the UI render support confidence instead of a warning flag.
+_MIN_INLIER_FRACTION = 0.10
+_WARN_FEW_INLIERS = "too_few_inliers"
 
 # Model-polarity threshold on the TRAIN-split raw correlation (relative depth
 # vs true elevation): below this the model output is treated as inverted
@@ -100,6 +107,19 @@ class CalibrationFit:
     # None on the degenerate_constant paths (no OLS was computed there).
     ransac_scale: Optional[float] = None
     ols_scale: Optional[float] = None
+
+    @property
+    def estimate_status(self) -> str:
+        """Coarse trust level for downstream surfaces (API, UI, export tags).
+
+        Derived from the health fields (never stored, so a reloaded fit cannot
+        drift): "failed" = degenerate fit with no usable scale/offset;
+        "low_confidence" = numerically valid but carries >=1 warning;
+        "ok" = valid fit, no warnings.
+        """
+        if self.degenerate:
+            return "failed"
+        return "low_confidence" if self.calibration_warning else "ok"
 
 
 def fit_affine(relative_d: np.ndarray, reference_h: np.ndarray) -> CalibrationFit:
@@ -273,6 +293,8 @@ def fit_affine(relative_d: np.ndarray, reference_h: np.ndarray) -> CalibrationFi
         warnings.append(_WARN_NEAR_CONSTANT)
     if relief > 0.0 and pred_span > _HIGH_RELIEF_FRACTION * relief:
         warnings.append(_WARN_LARGE_SCALE)
+    if n_inliers < _MIN_INLIER_FRACTION * d_train.size:
+        warnings.append(_WARN_FEW_INLIERS)
     warning = "; ".join(warnings) if warnings else None
     status = "warning" if warning else "valid"
 
@@ -440,3 +462,36 @@ def resample_to_grid(src: np.ndarray, target_shape: tuple) -> np.ndarray:
     img = img.resize((tw, th), Image.BILINEAR)
     res = np.asarray(img, dtype="float32") / 255.0 * (hi - lo) + lo
     return res
+
+
+def resample_reference(src: np.ndarray, src_meta: dict, target_shape: tuple,
+                       target_crs, target_transform) -> np.ndarray:
+    """Reproject a reference DEM onto the EXACT target grid (shape + affine).
+
+    Same rasterio.warp.reproject path evaluation.align_dem_to_prediction uses:
+    the source's OWN CRS/transform (src_meta) are mapped onto the target CRS +
+    affine, so a shifted/coarser/reprojected reference lands on the right
+    pixels instead of being array-resized as if the grids already agreed.
+    float32 in/out with NaN nodata. Falls back to resample_to_grid (shape-only
+    bilinear) when either side lacks georeferencing, which keeps the old
+    behavior for pixel-aligned fixtures without grid metadata.
+    """
+    src = np.asarray(src, dtype="float32")
+    if (src_meta.get("transform") is None or not src_meta.get("crs")
+            or target_transform is None or not target_crs):
+        return resample_to_grid(src, target_shape)
+
+    from rasterio.warp import Resampling, reproject
+
+    dst = np.full(target_shape, np.nan, dtype="float32")
+    reproject(
+        source=src,
+        destination=dst,
+        src_transform=src_meta["transform"],
+        src_crs=src_meta["crs"],
+        dst_transform=target_transform,
+        dst_crs=target_crs,
+        resampling=Resampling.bilinear,
+        dst_nodata=np.nan,
+    )
+    return dst
