@@ -1,5 +1,5 @@
 site_id,stratum,split,lon_wgs84,lat_wgs84,e_lv95,n_lv95,rationale
-aegeri,forest,test,8.6,47.13,2688113,1220542,forest above the lake
+aegeri,forest,test,8.6,47.1,2688162,1217207,mixed forest south of Unteraegeri (nDSM-verified)
 appenzell,hilly,train,9.4,47.33,2748242,1243979,"steep meadows, scattered farms"
 arolla,sparse,test,7.48,46.03,2603202,1097607,"high glacial valley, moraine"
 bachtel,forest,train,8.87,47.3,2708251,1239778,"forested ridge, mixed stands"

@@ -78,7 +78,7 @@ PRODUCTS = {
 }
 WATER_COLLECTION = "ch.swisstopo.swisstlmregio"
 WATER_ASSETS = ("_2056.gpkg.zip", "_2056.shp.zip", "_2056.gdb.zip")
-WATER_LAYER_HINTS = ("wasser", "gewaesser", "see", "fluss", "bach")
+WATER_LAYER_HINTS = ("lake", "stagnantwater", "flowingwater", "wasser", "see")
 
 # Site design: well-known Swiss locations, stratum assigned from the dominant
 # land cover / terrain of the ~1 km footprint (rationale column records why).
@@ -110,7 +110,7 @@ SITES = (
     ("vaud_jura", "forest", 6.3500, 46.6000, "continuous Jura forest"),
     ("gantrisch", "forest", 7.4500, 46.7200, "forested pre-alpine slopes"),
     ("val_colla", "forest", 9.1200, 46.0800, "southern broadleaf forest"),
-    ("aegeri", "forest", 8.6000, 47.1300, "forest above the lake"),
+    ("aegeri", "forest", 8.6000, 47.1000, "mixed forest south of Unteraegeri (nDSM-verified)"),
     ("randen", "forest", 8.5500, 47.7500, "wooded Randen plateau"),
 )
 
@@ -391,7 +391,7 @@ def plan_water_download(*, fetch=None) -> dict:
 # --------------------------------------------------------------------------- #
 
 def dest_abs(dest_rel: str) -> Path:
-    return REPO_ROOT / "server" / dest_rel
+    return DATA_DIR / dest_rel
 
 
 def run_downloads(requests, *, index_path=CHECKSUM_INDEX, workers: int = 4,
@@ -487,7 +487,7 @@ def _reproject_into(dst, dst_transform, src_path, *, src_bbox=None, bands=(1,),
                         masked=True)
         src_transform = src.window_transform(window)
         for band_index in range(len(bands)):
-            source = data[band_index].filled(np.nan).astype("float64")
+            source = data[band_index].astype("float64").filled(np.nan)
             destination = dst if dst.ndim == 2 else dst[band_index]
             reproject(source=source, destination=destination,
                       src_transform=src_transform, src_crs=src.crs,
@@ -524,23 +524,23 @@ def load_water_polygons(water_root, *, bbox=None):
     import fiona
 
     root = Path(water_root)
-    candidates = [p for p in sorted(root.rglob("*")) if p.suffix in (".gpkg",)]
+    candidates = sorted(root.rglob("*.gpkg"))
     if not candidates:
-        unpacked = unpack_water_archive(root)
-        candidates = [unpacked] if unpacked else []
+        unpack_water_archive(root)
+        candidates = sorted(root.rglob("*.gpkg"))
     if not candidates:
         raise FileNotFoundError(f"no TLMregio vector file under {root}")
-    path = candidates[-1]
     geometries = []
-    for layer in fiona.listlayers(path):
-        if not any(hint in layer.lower() for hint in WATER_LAYER_HINTS):
-            continue
-        with fiona.open(path, layer=layer, bbox=bbox) as collection:
-            for feature in collection:
-                geometry = feature.get("geometry")
-                if geometry and geometry.get("type") in (
-                        "Polygon", "MultiPolygon", "GeometryCollection"):
-                    geometries.append(geometry)
+    for path in candidates:
+        for layer in fiona.listlayers(path):
+            if not any(hint in layer.lower() for hint in WATER_LAYER_HINTS):
+                continue
+            with fiona.open(path, layer=layer, bbox=bbox) as collection:
+                for feature in collection:
+                    geometry = feature.get("geometry")
+                    if geometry and geometry.get("type") in (
+                            "Polygon", "MultiPolygon", "GeometryCollection"):
+                        geometries.append(geometry)
     return geometries
 
 
@@ -832,11 +832,11 @@ def cmd_build(args) -> int:
 
 def cmd_checksums(args) -> int:
     records = hr_download.collect_checksums(args.downloads_root)
-    server_root = REPO_ROOT / "server"
+    data_root = DATA_DIR.resolve()
     index = hr_download.load_checksums(args.index)
     for record in records:
         record["path"] = (Path(record["path"]).resolve()
-                          .relative_to(server_root).as_posix())
+                          .relative_to(data_root).as_posix())
         old = index.get(record["path"]) or {}
         record["url"] = old.get("url", "")
         record["product"] = old.get("product", "")
