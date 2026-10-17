@@ -32,12 +32,16 @@ unity-client/Assets/Scripts/Mesh/heal-*
 /server/_eval_*.json
 /server/scored_training_*.txt
 
+# Benchmark run outputs (large, regenerable; keep run dir per protocol)
+/benchmark_runs/
+
 # Frozen server inside client StreamingAssets (too large + long paths)
 unity-client/Assets/StreamingAssets/
 
 # Server packaging artifacts
 server/dist/
 server/build/
+server/test/test_audit_generalization.py
 
 # Python
 __pycache__/
@@ -80,3 +84,5 @@ opencode.json
 AGENTS.md
 server/DEPLOYMENT.md
 server/app/DEPLOYMENT.md
+DOMAIN_GAP_ANALYSIS.md
+
