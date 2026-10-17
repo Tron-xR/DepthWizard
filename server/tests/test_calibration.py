@@ -155,10 +155,10 @@ def test_ransac_sign_flip_falls_back_to_ols_scale():
                  3000.0 * d + 1000.0 + rng.normal(0, 2.0, n))
     fit = calib.fit_affine(d.reshape(64, 64), h.reshape(64, 64))
     assert fit.scale > 0.0
-    # warnings accumulate (single field, "; "-joined): the fixture is ALSO a
-    # near-constant model output (raw std << reference std), so both hazards
-    # are surfaced rather than the sign-disagreement shadowing the other
-    assert fit.calibration_warning == "ransac_sign_disagreement; prediction_near_constant"
+    # uniform(0,1) prediction: healthy OWN relative variation (std/|mean| ~0.58),
+    # so the scale-free near-constant rule stays quiet and only the instability
+    # itself is surfaced
+    assert fit.calibration_warning == "ransac_sign_disagreement"
     assert fit.polarity_inverted is False
 
 
@@ -171,9 +171,9 @@ def test_genuinely_inverted_keeps_negative_scale_and_flags_polarity():
     h = -200.0 * d + 400.0 + rng.normal(0, 20.0, d.shape)
     fit = calib.fit_affine(d, h)
     assert fit.scale < 0.0
-    # same accumulate semantics as the flip test: raw d (std 0.29) vs h (relief
-    # ~400) makes the fixture near-constant too, surfaced alongside the sign warn
-    assert fit.calibration_warning == "negative_scale; prediction_near_constant"
+    # uniform(0,1) prediction: own relative variation is healthy, so the
+    # scale-free near-constant rule does not fire next to the sign warning
+    assert fit.calibration_warning == "negative_scale"
     assert fit.polarity_inverted is True
     assert "inverted relative to the reference" in fit.polarity_reason
 
@@ -195,9 +195,10 @@ def test_fit_affine_flags_absurd_magnitude_scale():
     fit = calib.fit_affine(d, h)
     assert fit.degenerate is False
     assert fit.calibration_status == "warning"
-    # the magnitude hazard is present, and the sign + flatness hazards of the
-    # same fit are still surfaced instead of being shadowed
-    assert fit.calibration_warning == "negative_scale; prediction_near_constant; scale_too_large"
+    # the magnitude hazard is present; the sign hazard of the same fit is still
+    # surfaced, while the scale-free near-constant rule stays quiet (the spikey
+    # prediction has healthy own relative variation)
+    assert fit.calibration_warning == "negative_scale; scale_too_large"
     # sanity: the fixture really is the amplification pathology (span > 2x relief)
     amplification = abs(fit.scale) * float(np.ptp(d)) / float(np.ptp(h))
     assert amplification > 2.0

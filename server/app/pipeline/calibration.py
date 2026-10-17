@@ -275,13 +275,20 @@ def fit_affine(relative_d: np.ndarray, reference_h: np.ndarray) -> CalibrationFi
     #   negative_scale        -> contradicts the brighter=higher convention;
     #                             never abs()'d (would fake a positive
     #                             association the model does not have).
-    #   prediction_near_constant -> prediction variance is below
-    #                             config.MIN_RELATIVE_STD of the reference's
-    #                             own variance (model output effectively flat).
+    #   prediction_near_constant -> the prediction's own relative variation
+    #                             (std / |mean|) is below config.MIN_RELATIVE_STD
+    #                             (model output effectively flat). Scale-free: an
+    #                             earlier std-vs-reference-std ratio flagged
+    #                             every 0..1-normalized depth map scored against
+    #                             a meter-scale DEM (found via benchmark results).
     #   scale_too_large       -> |scale| maps the raw range onto a span >
     #                             _HIGH_RELIEF_FRACTION x the tile's own relief
     #                             (amplification artifact; magnitude not literal).
-    rel_std = sp / sr if sr > 0.0 else float("inf")
+    mean_d = float(np.mean(d))
+    if mean_d != 0.0:
+        rel_std = sp / abs(mean_d)
+    else:
+        rel_std = 0.0 if sp == 0.0 else float("inf")
     warnings = []
     if sign_disagreement:
         warnings.append(_WARN_RANSAC_SIGN_DISAGREEMENT)

@@ -171,7 +171,15 @@ def test_validation_carries_estimate_status_and_inliers(geo_environment, monkeyp
     from app.schemas import ValidationResponse
 
     upload, true_elev = geo_environment
-    monkeypatch.setattr(depth, "infer_relative_dsm", _fake_rdsm)
+
+    def _flat_rdsm(rgb, **_kw):
+        # genuinely near-constant prediction: the scale-free near-constant rule
+        # flags it (std/|mean| ~ 1e-4) regardless of the reference's units
+        rgb = np.asarray(rgb)
+        n = rgb.shape[0] * rgb.shape[1]
+        return (0.5 + 1e-4 * np.linspace(0, 1, n)).reshape(rgb.shape[:2]).astype("float32")
+
+    monkeypatch.setattr(depth, "infer_relative_dsm", _flat_rdsm)
     job = db.create_job(upload["id"], "absolute_dsm")
     jobs._run_job(job["id"])
     assert db.get_job(job["id"])["status"] == "done"

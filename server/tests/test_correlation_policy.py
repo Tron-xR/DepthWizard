@@ -81,9 +81,9 @@ def test_f_negative_correlation_kept_and_fit_flagged():
     assert fit.scale == pytest.approx(-100.0, abs=1e-3)   # kept, NOT abs()'d
     assert fit.degenerate is False
     assert fit.calibration_status == "warning"
-    # warnings accumulate (single field, "; "-joined): ramp 0..1 vs relief 120
-    # makes the fixture near-constant too, surfaced next to the sign warning
-    assert fit.calibration_warning == "negative_scale; prediction_near_constant"
+    # ramp 0..1: healthy own relative variation, so the scale-free
+    # near-constant rule stays quiet next to the sign warning
+    assert fit.calibration_warning == "negative_scale"
 
     # Raw (uncalibrated) relative-depth correlation stays NEGATIVE - the sign
     # is never flipped anywhere in the API.
@@ -98,7 +98,7 @@ def test_f_negative_correlation_kept_and_fit_flagged():
     cal = ev.evaluate_prediction_truth(ramp, dem, mode="calibrated")
     assert cal["correlation"] == pytest.approx(1.0, abs=1e-6)
     assert cal["calibration_scale"] == pytest.approx(-100.0, abs=1e-3)
-    assert cal["calibration_warning"] == "negative_scale; prediction_near_constant"
+    assert cal["calibration_warning"] == "negative_scale"
 
 
 # ---- near-constant prediction is a warning on a VALID fit -------------------- #
@@ -112,6 +112,24 @@ def test_near_constant_prediction_warns_but_still_fits():
     assert fit.degenerate is False
     assert fit.calibration_status == "warning"
     assert fit.calibration_warning == "prediction_near_constant"
+
+
+def test_near_constant_rule_is_scale_free():
+    """The rule compares the prediction's own relative variation (std/|mean|),
+    not its absolute spread vs the meter-scale reference: a 0..1-normalized map
+    against a 100 m-relief DEM is healthy, the same map at x1000 is healthy
+    too, and a flat prediction is flagged at any magnitude."""
+    ramp = np.linspace(0, 1, 32 * 32).reshape(32, 32)
+    dem = 50.0 + 100.0 * ramp
+    healthy = 0.5 + 0.4 * ramp                       # std/|mean| ~ 0.46
+    assert calib.fit_affine(healthy, dem).calibration_warning is None
+    assert calib.fit_affine(healthy * 1000.0, dem).calibration_warning is None
+
+    flat = 500.0 + 0.0005 * ramp                     # std/|mean| ~ 3e-7
+    assert (calib.fit_affine(flat, dem).calibration_warning
+            == "prediction_near_constant")
+    assert (calib.fit_affine(flat * 1000.0, dem).calibration_warning
+            == "prediction_near_constant")
 
 
 # ---- healthy scene: no warnings, no reason ----------------------------------- #

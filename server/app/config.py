@@ -22,10 +22,12 @@ PORT: int = int(os.environ.get("DEPTHWIZARD_PORT", "8000"))
 MAX_WORKING_DIM: int = int(os.environ.get("DEPTHWIZARD_MAX_DIM", "1024"))
 # Vertical relief (m) applied to the normalized relative DSM so Unity meshes are legible.
 RELATIVE_ELEVATION_RANGE_M: float = float(os.environ.get("DEPTHWIZARD_RELIEF_M", "200"))
-# Calibration-health threshold: a prediction whose std is below this FRACTION of
-# the reference DEM's own std is treated as effectively constant (warned as
-# "prediction_near_constant") even when the affine fit is numerically valid.
-# Relative, not absolute, so a genuinely near-flat scene is not over-flagged.
+# Calibration-health threshold: a prediction whose own relative variation
+# (std / |mean|, scale-free) is below this FRACTION is treated as effectively
+# constant (warned as "prediction_near_constant") even when the affine fit is
+# numerically valid. Comparing against the prediction's own magnitude (not the
+# reference's std) keeps 0..1-normalized relative-depth maps from being flagged
+# purely because the reference is in meters.
 MIN_RELATIVE_STD: float = max(
     float(os.environ.get("DEPTHWIZARD_MIN_RELATIVE_STD", "0.05")), 1e-9
 )

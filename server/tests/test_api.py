@@ -184,6 +184,16 @@ def test_export_dsm_absolute(client, monkeypatch, tmp_path):
     from rasterio.transform import from_origin
 
     from app import db, jobs
+    from app.pipeline import depth
+
+    # deterministic near-constant relative DSM (std/|mean| ~ 1e-4) so the
+    # persisted fit is genuinely low_confidence whatever the environment
+    def _flat_rdsm(rgb, **_kw):
+        rgb = np.asarray(rgb)
+        n = rgb.shape[0] * rgb.shape[1]
+        return (0.5 + 1e-4 * np.linspace(0, 1, n)).reshape(rgb.shape[:2]).astype("float32")
+
+    monkeypatch.setattr(depth, "infer_relative_dsm", _flat_rdsm)
 
     # local reference DEM so no network is needed (matches geo_environment in
     # test_absolute_branch: true elevation 150 + 0.7xx + 0.3yy over 40x40)
