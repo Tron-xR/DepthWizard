@@ -109,7 +109,8 @@ SITES = (
     ("bachtel", "forest", 8.8700, 47.3000, "forested ridge, mixed stands"),
     ("vaud_jura", "forest", 6.3500, 46.6000, "continuous Jura forest"),
     ("gantrisch", "forest", 7.4500, 46.7200, "forested pre-alpine slopes"),
-    ("val_colla", "forest", 9.1200, 46.0800, "southern broadleaf forest"),
+    ("monte_san_giorgio", "forest", 8.9450, 45.9050,
+     "UNESCO beech forest, Monte San Giorgio (nDSM-verified)"),
     ("aegeri", "forest", 8.6000, 47.1000, "mixed forest south of Unteraegeri (nDSM-verified)"),
     ("randen", "forest", 8.5500, 47.7500, "wooded Randen plateau"),
 )
@@ -656,6 +657,7 @@ def build_tile(tile, *, downloads_root=DOWNLOADS_ROOT, out_root=HR_ROOT,
     dtm_year = max(years["dtm"]) if years["dtm"] else ""
 
     paths = {}
+
     def _write(name, array, count, dtype="float32", nodata=np.nan):
         path = out_dir / f"{tile['tile_id']}_{name}.tif"
         profile = dict(driver="GTiff", height=shape[0], width=shape[1],
@@ -823,6 +825,17 @@ def cmd_build(args) -> int:
             print(f"[build] {tile['tile_id']} valid={result['valid_frac']} "
                   f"offset={result['datum_offset_m'] or '-'} "
                   f"flags={result['flags'] or '-'}")
+    site_offsets = {}
+    for row in manifest_rows:
+        if row["datum_offset_m"]:
+            site_offsets.setdefault(row["site_id"], []).append(
+                float(row["datum_offset_m"]))
+    for row in manifest_rows:
+        if not row["datum_offset_m"]:
+            values = site_offsets.get(row["site_id"])
+            if values:
+                row["datum_offset_m"] = f"{float(np.median(values)):.3f}"
+                row["datum_offset_method"] = "site_median"
     write_manifest(args.manifest, manifest_rows)
     temporal = sum(1 for r in manifest_rows if r["temporal_flag"])
     print(f"[build] {len(manifest_rows)} tiles -> {args.manifest} "

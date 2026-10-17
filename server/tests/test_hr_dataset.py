@@ -15,7 +15,7 @@ from app.pipeline import evaluation, hr_dataset, hr_download
 
 FROZEN_TEST_SITES = {
     "aegeri", "arolla", "chasseral", "geneva_center",
-    "lausanne_center", "napf", "saas_fee", "val_colla",
+    "lausanne_center", "napf", "saas_fee", "sihlwald",
 }
 
 CELL = "2600-1200"
@@ -334,3 +334,19 @@ def test_manifest_row_validates_with_harness(tmp_path, monkeypatch):
     assert rows[0]["site_id"] == "testsite"
     assert rows[0]["reference_hr_path"] == result["dsm_path"]
     assert rows[0]["stratum"] == "urban"
+
+
+def test_shipped_hr_manifest_validates():
+    path = hr_dataset.MANIFEST_HR
+    if not path.exists():
+        pytest.skip("hr dataset not built yet")
+    rows, validation = evaluation.load_manifest(path, guard_km=10.0)
+    assert validation["errors"] == []
+    assert len(rows) == 112
+    site_splits = {}
+    for row in rows:
+        site_splits.setdefault(row["site_id"], set()).add(row["split"])
+        assert (evaluation._REPO_ROOT / row["reference_hr_path"]).exists()
+        assert row["datum_offset_m"]
+    assert all(len(splits) == 1 for splits in site_splits.values())
+    assert sum(1 for r in rows if r["temporal_flag"] == "True") == 6
