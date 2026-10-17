@@ -1,0 +1,29 @@
+site_id,stratum,split,lon_wgs84,lat_wgs84,e_lv95,n_lv95,rationale
+aegeri,forest,test,8.6,47.13,2688113,1220542,forest above the lake
+appenzell,hilly,train,9.4,47.33,2748242,1243979,"steep meadows, scattered farms"
+arolla,sparse,test,7.48,46.03,2603202,1097607,"high glacial valley, moraine"
+bachtel,forest,train,8.87,47.3,2708251,1239778,"forested ridge, mixed stands"
+basel_center,urban,train,7.5886,47.5596,2611288,1267665,city core at the Rhine
+bern_center,urban,train,7.4474,46.948,2600667,1199657,"old town, dense blocks"
+chasseral,hilly,test,7.05,47.13,2570514,1219964,"Jura ridge, pastures"
+emmental,hilly,val,7.7,46.95,2619897,1199913,rolling farmland hills
+gantrisch,forest,val,7.45,46.72,2600869,1174311,forested pre-alpine slopes
+geneva_center,urban,test,6.1432,46.2044,2500016,1117821,city core left of the lake
+grimsel,sparse,val,8.335,46.562,2668729,1157139,bare granite high plateau
+gruyeres,hilly,train,7.08,46.58,2572510,1158811,pre-alpine pastures
+la_dole,hilly,val,6.1,46.42,2497092,1141841,"Jura crest, open slopes"
+lausanne_center,urban,test,6.6323,46.5197,2538124,1152363,steep city above the lake
+luzern_center,urban,val,8.3093,47.0502,2666157,1211386,city core at the lake outlet
+maggia_valley,hilly,train,8.7,46.25,2697272,1122844,steep Ticino valley walls
+napf,hilly,test,7.94,47.01,2638125,1206671,pre-alpine hill country
+randen,forest,train,8.55,47.75,2683343,1289415,wooded Randen plateau
+saas_fee,sparse,test,7.93,46.11,2637990,1106618,"high valley, bare slopes"
+samedan,sparse,train,9.8712,46.534,2786589,1156526,open Engadin valley floor
+sihlwald,forest,val,8.48,47.27,2678802,1235978,dense beech forest
+simplon,sparse,train,8.03,46.25,2645605,1122234,bare alpine pass slopes
+susten,sparse,train,8.44,46.73,2676542,1175910,"bare pass terrain, scree"
+val_colla,forest,test,9.12,46.08,2730061,1104558,southern broadleaf forest
+vaud_jura,forest,train,6.35,46.6,2516587,1161551,continuous Jura forest
+winterthur,urban,train,8.7241,47.4985,2696856,1261653,"city core, industrial edges"
+zermatt,sparse,val,7.7486,46.0207,2624004,1096620,"alpine village, bare valley walls"
+zurich_center,urban,val,8.5417,47.3769,2683304,1247926,"dense city core, mixed roofs"
