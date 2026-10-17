@@ -170,6 +170,93 @@ def test_bicubic_reference_uses_real_reprojection():
     assert np.max(np.abs(nearest[interior, interior] - expected[interior, interior])) > 0.1
 
 
+# ---- baselines: prior degradation + constant mean ---------------------------- #
+def test_prior_degradation_baseline_degrades_reference():
+    # a linear plane survives block-average + cubic (plane-preserving): the
+    # baseline must not invent error where a coarse prior is lossless
+    plane = _ramp()
+    rec = ev.evaluate_tile_arrays(plane, {}, gsd_m=10.0, prior_res_m=(50.0, 250.0),
+                                  block=20, guard=2, seed=1)
+    assert rec["baselines"]["prior_50m"]["status"] == "ok"
+    assert rec["baselines"]["prior_50m"]["rmse"] < 0.2
+
+    # a high-frequency surface is destroyed by the same degradation
+    y, x = np.mgrid[0:120, 0:120]
+    wavy = (100.0 + 50.0 * np.sin(2.0 * np.pi * x / 8.0)).astype("float32")
+    rec2 = ev.evaluate_tile_arrays(wavy, {}, gsd_m=10.0, prior_res_m=(90.0,),
+                                   block=20, guard=2, seed=1)
+    assert rec2["baselines"]["prior_90m"]["rmse"] > 0.5 * rec2["reference_std"]
+
+    # nodata in the reference neither blanks the baseline nor leaks into stats
+    holed = _ramp().copy()
+    holed[0:30, 0:30] = np.nan
+    rec3 = ev.evaluate_tile_arrays(holed, {}, gsd_m=10.0, prior_res_m=(50.0,),
+                                   block=20, guard=2, seed=1)
+    assert rec3["baselines"]["prior_50m"]["status"] == "ok"
+    assert rec3["baselines"]["prior_50m"]["rmse"] is not None
+
+    # unavailable without a usable gsd / when not coarser than the native grid
+    rec4 = ev.evaluate_tile_arrays(plane, {}, prior_res_m=(50.0,),
+                                   block=20, guard=2, seed=1)
+    assert rec4["baselines"]["prior_50m"]["status"] == "unavailable"
+    rec5 = ev.evaluate_tile_arrays(plane, {}, gsd_m=10.0, prior_res_m=(5.0,),
+                                   block=20, guard=2, seed=1)
+    assert rec5["baselines"]["prior_5m"]["status"] == "unavailable"
+
+
+def test_constant_mean_baseline_and_reference_std_use_calibration_split():
+    dem = _ramp()
+    rec = ev.evaluate_tile_arrays(dem, {}, block=20, guard=2, seed=1)
+    calib_m, eval_m = ev.spatial_block_split(dem.shape, block=20, guard=2)
+    calib_px = calib_m & np.isfinite(dem)
+    eval_px = eval_m & np.isfinite(dem)
+
+    b = rec["baselines"]["const_mean"]
+    expected = float(np.mean(dem[calib_px].astype("float64")))
+    assert b["status"] == "ok"
+    assert b["value"] == pytest.approx(expected)
+    # scored against the eval split only: no calibration-pixel leakage
+    assert b["rmse"] == pytest.approx(
+        float(np.sqrt(np.mean((expected - dem[eval_px].astype("float64")) ** 2))))
+    assert rec["reference_std"] == pytest.approx(
+        float(np.std(dem[eval_px].astype("float64"))))
+
+
+def test_baseline_improvement_and_skill_aggregate():
+    dem = _ramp()
+    good = (5.0 + 0.2 * (dem - float(dem.min()))).astype("float32")
+    rec = ev.evaluate_tile_arrays(dem, {"bk": good}, gsd_m=10.0,
+                                  prior_res_m=(50.0,), block=20, guard=2, seed=1)
+    rec.update({"tile_id": "t1", "site_id": "s", "stratum": "hilly",
+                "split": "test"})
+    agg = ev.aggregate_records([rec], bootstrap_iters=10, seed=1)
+    arm = agg["arms"]["bk"]
+    assert agg["baseline_prior"] == "prior_50m"
+    prior_rmse = agg["baselines"]["prior_50m"]["rmse"]
+    assert arm["improvement_vs_baseline"] == pytest.approx(
+        (prior_rmse - arm["cal_rmse"]) / prior_rmse)
+    assert arm["skill_vs_const"] == pytest.approx(
+        1.0 - arm["cal_rmse"] / agg["baselines"]["const_mean"]["rmse"])
+    assert arm["contaminated"] is False
+
+
+def test_contaminated_arm_excluded_from_primary_choice():
+    dem = _ramp()
+    good = (5.0 + 0.2 * (dem - float(dem.min()))).astype("float32")
+    noisy = (good + np.random.default_rng(3).normal(0, 8.0, dem.shape)).astype("float32")
+    rec = ev.evaluate_tile_arrays(dem, {"finetuned": good, "da2": noisy},
+                                  block=20, guard=2, seed=1)
+    rec.update({"tile_id": "t1", "site_id": "s", "stratum": "hilly",
+                "split": "test"})
+    agg = ev.aggregate_records([rec], bootstrap_iters=10, seed=1)
+    assert agg["arms"]["finetuned"]["contaminated"] is True
+    assert agg["arms"]["da2"]["contaminated"] is False
+    # finetuned has the lower RMSE here, yet da2 is primary: contamination
+    # disqualifies it from the choice, not just from the label
+    assert agg["arms"]["finetuned"]["cal_rmse"] < agg["arms"]["da2"]["cal_rmse"]
+    assert agg["primary_arm"] == "da2"
+
+
 def test_benchmark_deterministic_for_same_inputs():
     dem = _ramp()
     pred = _ramp(a=2.0, b=0.3)
@@ -187,10 +274,10 @@ def _stub_aggregate():
     return {
         "primary_arm": "bk",
         "arms": {"bk": {"cal_rmse": 1.0, "raw_r": 0.5,
-                        "improvement_vs_bicubic": None,
+                        "improvement_vs_baseline": None,
                         "failures": {"failure_rate": 0.0}}},
         "per_stratum": {"hilly": {"arms": {
-            "bk": {"improvement_vs_bicubic": None}}}},
+            "bk": {"improvement_vs_baseline": None}}}},
     }
 
 
@@ -198,7 +285,7 @@ def test_acceptance_reads_thresholds_only_from_config():
     cfg = {"minimum_improvement": 0.05, "per_stratum_improvement": {"hilly": 0.0},
            "max_failure_rate": 0.10, "min_raw_correlation": 0.20, "min_test_sites": 3}
     agg = _stub_aggregate()
-    # self-referential bicubic (improvement None) -> not measurable, not pass
+    # no prior-degradation baseline (improvement None) -> not measurable, not pass
     assert ev.evaluate_acceptance(cfg, agg, n_test_sites=3)["verdict"] == "not_measurable"
     # the same aggregate FAILS once the shipped failure threshold is exceeded
     agg["arms"]["bk"]["failures"]["failure_rate"] = 0.5

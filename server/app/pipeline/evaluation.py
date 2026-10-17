@@ -436,6 +436,10 @@ _DEFAULT_PREDICTION_RUNS = {
 # reprojection): a fractional "improvement vs bicubic" would divide by float
 # noise. Real interpolation error from a genuinely coarser product is >= 0.1 m.
 _BICUBIC_SELF_REFERENTIAL_M = 0.01
+# Backends whose training saw validation/test-site ground truth. Their numbers
+# are reported but never used for primary-arm choice or acceptance checks.
+_CONTAMINATED_ARMS = frozenset({"finetuned"})
+_CONTAMINATED_REASON = "contaminated (trained on val/test sites)"
 
 
 class ManifestError(ValueError):
@@ -603,6 +607,70 @@ def _resample_reference(dem, shape, *, georef=None, resampling: str = "cubic"):
         "georeferencing was provided to resample it")
 
 
+def _block_mean(a, factor, axis):
+    """NaN-aware mean of consecutive blocks of ~`factor` pixels along `axis`.
+
+    Block boundaries are rounded to whole pixels (fractional factors are an
+    approximation), the final block takes the remainder, and a block with no
+    finite sample comes back NaN.
+    """
+    n = a.shape[axis]
+    f = max(float(factor), 1.0)
+    edges = np.unique(np.round(np.append(np.arange(0.0, n, f), float(n))).astype(int))
+    vals = np.where(np.isfinite(a), a, 0.0).astype("float64")
+    cnt = np.isfinite(a).astype("float64")
+    zero_shape = list(a.shape)
+    zero_shape[axis] = 1
+    csum = np.concatenate([np.zeros(zero_shape), np.cumsum(vals, axis=axis)], axis=axis)
+    ccnt = np.concatenate([np.zeros(zero_shape), np.cumsum(cnt, axis=axis)], axis=axis)
+    sums = np.take(csum, edges[1:], axis=axis) - np.take(csum, edges[:-1], axis=axis)
+    counts = np.take(ccnt, edges[1:], axis=axis) - np.take(ccnt, edges[:-1], axis=axis)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return sums / counts
+
+
+def _degrade_reference(dem, res_m, gsd_m):
+    """Prior-degradation baseline surface on the native grid.
+
+    Block-averages the native reference to `res_m` ground spacing, then cubic-
+    resamples it back to the native grid - an approximation of what a coarser
+    prior DEM (90/250 m products) offers before any model runs. Nodata is
+    nearest-filled before the cubic pass (a spline prefilter would smear one
+    NaN across the whole row); pixels beyond the original data are excluded
+    from scoring anyway by the shared valid mask.
+    """
+    from scipy import ndimage
+
+    a = np.asarray(dem, dtype="float64")
+    f = res_m / gsd_m
+    coarse = _block_mean(_block_mean(a, f, axis=1), f, axis=0)
+    if not np.all(np.isfinite(coarse)):
+        if not np.any(np.isfinite(coarse)):
+            return np.full(a.shape, np.nan, dtype="float32")
+        ind = ndimage.distance_transform_edt(
+            ~np.isfinite(coarse), return_distances=False, return_indices=True)
+        coarse = coarse[tuple(ind)]
+    h, w = a.shape
+    yy, xx = np.meshgrid((np.arange(h) + 0.5) / f - 0.5,
+                         (np.arange(w) + 0.5) / f - 0.5, indexing="ij")
+    return ndimage.map_coordinates(coarse, [yy, xx], order=3,
+                                   mode="nearest").astype("float32")
+
+
+def _baseline_links(cal_rmse, baselines) -> dict:
+    """Per-arm delta/improvement against every baseline (None, never NaN)."""
+    links = {}
+    for name, base in baselines.items():
+        base_rmse = base.get("rmse")
+        if cal_rmse is not None and base_rmse:
+            links[f"delta_vs_{name}"] = cal_rmse - base_rmse
+            links[f"improvement_vs_{name}"] = (base_rmse - cal_rmse) / base_rmse
+        else:
+            links[f"delta_vs_{name}"] = None
+            links[f"improvement_vs_{name}"] = None
+    return links
+
+
 def _arm_stats(pred, truth, mask) -> dict:
     """MAE/RMSE/bias/Pearson of one arm over one pixel mask (NaN-safe)."""
     n = int(np.count_nonzero(mask))
@@ -644,13 +712,16 @@ def _fit_on_mask(pred, dem, mask) -> tuple:
 
 def evaluate_tile_arrays(dem, predictions: dict, *, georef=None,
                          block: int = 180, guard: int = 8,
-                         calib_cap: int = 2_000_000, seed: int = 42) -> dict:
+                         calib_cap: int = 2_000_000, seed: int = 42,
+                         prior_res_m=(), gsd_m=None) -> dict:
     """All arms of one tile on one shared valid-pixel mask.
 
     predictions: {backend: float array expected on the reference grid}.
     Backends whose grid does not match are skipped and recorded, never
     silently broadcast. `georef` (src+stp transforms/CRS) drives the real
-    reference reprojection for the nearest/bicubic baselines.
+    reference reprojection for the nearest/bicubic reference-agreement arms.
+    `prior_res_m` (ground metres) + `gsd_m` enable the prior-degradation
+    baselines; they are unavailable without a usable tile gsd.
     """
     dem = np.asarray(dem, dtype="float32")
     shape = dem.shape
@@ -681,14 +752,51 @@ def evaluate_tile_arrays(dem, predictions: dict, *, georef=None,
         "n_valid": int(np.count_nonzero(valid)),
         "n_calib_pixels": int(np.count_nonzero(calib_px)),
         "n_eval_pixels": int(np.count_nonzero(eval_px)),
+        "reference_std": (float(np.std(dem[eval_px].astype("float64")))
+                          if int(np.count_nonzero(eval_px)) >= 2 else None),
         "reference": {
             "nearest": _arm_stats(ref_nearest, dem, eval_px),
             "bicubic": _arm_stats(ref_cubic, dem, eval_px),
         },
+        "baselines": {},
         "backends": {},
         "skipped_backends": skipped,
         "status": "ok" if np.any(eval_px) else "no_eval_pixels",
     }
+
+    # Baselines for improvement/skill checks, all scored on the same eval mask:
+    #   const_mean -> the calibration-region reference mean (no eval leakage);
+    #   prior_Nm   -> the reference block-averaged to N metres, cubic-resampled
+    #                 back (what a coarser prior DEM offers before any model).
+    baselines = record["baselines"]
+    if np.any(calib_px):
+        const_value = float(np.mean(dem[calib_px].astype("float64")))
+        stats = _arm_stats(np.full(shape, const_value, dtype="float32"), dem, eval_px)
+        baselines["const_mean"] = {
+            "status": "ok", "value": const_value, "n": stats["n"],
+            "rmse": stats["rmse"], "mae": stats["mae"], "bias": stats["bias"],
+            "r": stats["correlation"], "reason": stats["correlation_reason"],
+        }
+    else:
+        baselines["const_mean"] = {
+            "status": "unavailable", "reason": "no calibration pixels"}
+    for res in prior_res_m:
+        name = f"prior_{res:g}m"
+        if gsd_m is None or gsd_m <= 0:
+            baselines[name] = {"status": "unavailable", "res_m": res,
+                               "reason": "tile gsd missing from the manifest"}
+        elif res <= gsd_m:
+            baselines[name] = {
+                "status": "unavailable", "res_m": res,
+                "reason": f"prior resolution <= tile gsd ({gsd_m:g} m)"}
+        else:
+            prior = _degrade_reference(dem, res, gsd_m)
+            stats = _arm_stats(prior, dem, eval_px)
+            baselines[name] = {
+                "status": "ok", "res_m": res, "n": stats["n"],
+                "rmse": stats["rmse"], "mae": stats["mae"], "bias": stats["bias"],
+                "r": stats["correlation"], "reason": stats["correlation_reason"],
+            }
 
     # Cap calibration pixels (deterministic by seed): the 3857 tiles have
     # ~2.5M pixels each; fitting every one costs minutes for no accuracy gain.
@@ -710,6 +818,7 @@ def evaluate_tile_arrays(dem, predictions: dict, *, georef=None,
                 "delta_vs_bicubic": None, "improvement_vs_bicubic": None,
                 "scale": None, "offset": None, "inliers": None, "warning": None,
                 "estimate_status": None, "polarity_inverted": None,
+                **_baseline_links(None, baselines),
             })
         elif fit.degenerate:
             backend.update({
@@ -720,6 +829,7 @@ def evaluate_tile_arrays(dem, predictions: dict, *, georef=None,
                 "warning": fit.calibration_warning,
                 "estimate_status": fit.estimate_status,
                 "polarity_inverted": fit.polarity_inverted,
+                **_baseline_links(None, baselines),
             })
         else:
             cal = _arm_stats(fit.scale * pred.astype("float64") + fit.offset, dem, eval_px)
@@ -739,6 +849,7 @@ def evaluate_tile_arrays(dem, predictions: dict, *, georef=None,
                 "polarity_inverted": fit.polarity_inverted,
                 "calibrated_reason": None,
             })
+            backend.update(_baseline_links(cal["rmse"], baselines))
         # Within-scene random-split diagnostic: same fit machinery, random
         # pixels instead of spatial blocks - reported, never headlined.
         random_fit_px = _cap_mask(valid, calib_cap, rng)
@@ -832,6 +943,25 @@ def aggregate_records(tile_records, *, bootstrap_iters: int = 1000,
                 per_site.setdefault(t["site_id"], []).append(value)
         return {site: float(np.mean(v)) for site, v in per_site.items()}
 
+    def baseline_names(tiles):
+        seen: dict = {}
+        for t in tiles:
+            for name, info in (t.get("baselines") or {}).items():
+                seen.setdefault(name, (info or {}).get("res_m"))
+        return sorted(seen, key=lambda n: (seen[n] is None, seen[n] or 0.0, n))
+
+    def prior_names(tiles):
+        return [n for n in baseline_names(tiles) if n.startswith("prior_")]
+
+    def baseline_weighted(tiles, name, key):
+        per_site: dict = {}
+        for t in tiles:
+            value = ((t.get("baselines") or {}).get(name) or {}).get(key)
+            if value is not None:
+                per_site.setdefault(t["site_id"], []).append(value)
+        site_means = [float(np.mean(v)) for v in per_site.values()]
+        return float(np.mean(site_means)) if site_means else None
+
     def arm_summary(tiles, backend):
         warning_counts: dict = {}
         for t in tiles:
@@ -853,6 +983,21 @@ def aggregate_records(tile_records, *, bootstrap_iters: int = 1000,
             "failures": _failure_stats(tiles, backend),
             "warning_counts": warning_counts,
         }
+        links = {}
+        for name in baseline_names(tiles):
+            for prefix in ("delta_vs_", "improvement_vs_"):
+                links[prefix + name] = _site_weighted(tiles, backend, prefix + name)
+        summary.update(links)
+        priors = prior_names(tiles)
+        summary["delta_vs_baseline"] = (
+            links.get(f"delta_vs_{priors[0]}") if priors else None)
+        summary["improvement_vs_baseline"] = (
+            links.get(f"improvement_vs_{priors[0]}") if priors else None)
+        const_rmse = baseline_weighted(tiles, "const_mean", "rmse")
+        summary["skill_vs_const"] = (
+            1.0 - summary["cal_rmse"] / const_rmse
+            if summary["cal_rmse"] is not None and const_rmse else None)
+        summary["contaminated"] = backend in _CONTAMINATED_ARMS
         return summary
 
     overall_arms = {b: arm_summary(tile_records, b) for b in backends}
@@ -875,7 +1020,8 @@ def aggregate_records(tile_records, *, bootstrap_iters: int = 1000,
         }
         per_site[site] = entry
 
-    available = [b for b, s in overall_arms.items() if s["cal_rmse"] is not None]
+    available = [b for b, s in overall_arms.items()
+                 if s["cal_rmse"] is not None and not s["contaminated"]]
     primary = min(available, key=lambda b: overall_arms[b]["cal_rmse"]) if available else None
 
     def reference_metric(name):
@@ -887,28 +1033,51 @@ def aggregate_records(tile_records, *, bootstrap_iters: int = 1000,
         site_means = [float(np.mean(v)) for v in per_site.values()]
         return float(np.mean(site_means)) if site_means else None
 
+    priors = prior_names(tile_records)
     bootstrap = {}
     for b in backends:
         if b not in available:
             continue
-        bootstrap[b] = {
+        block = {
             "cal_rmse": _bootstrap_ci(site_values(tile_records, b, "cal_rmse").values(),
                                       iterations=bootstrap_iters, seed=seed),
-            "delta_vs_bicubic": _bootstrap_ci(
-                site_values(tile_records, b, "delta_vs_bicubic").values(),
-                iterations=bootstrap_iters, seed=seed),
             "raw_r": _bootstrap_ci(site_values(tile_records, b, "raw_r").values(),
                                    iterations=bootstrap_iters, seed=seed),
+        }
+        if priors:
+            block["delta_vs_baseline"] = _bootstrap_ci(
+                site_values(tile_records, b, f"delta_vs_{priors[0]}").values(),
+                iterations=bootstrap_iters, seed=seed)
+        bootstrap[b] = block
+    names = baseline_names(tile_records)
+    baselines_out = {}
+    for name in names:
+        sample = next(((t.get("baselines") or {}).get(name) for t in tile_records
+                       if (t.get("baselines") or {}).get(name)), {}) or {}
+        baselines_out[name] = {
+            "res_m": sample.get("res_m"),
+            "value": baseline_weighted(tile_records, name, "value"),
+            "rmse": baseline_weighted(tile_records, name, "rmse"),
+            "mae": baseline_weighted(tile_records, name, "mae"),
+            "bias": baseline_weighted(tile_records, name, "bias"),
+            "r": baseline_weighted(tile_records, name, "r"),
+            "n_tiles": sum(1 for t in tile_records
+                           if ((t.get("baselines") or {}).get(name) or {})
+                           .get("status") == "ok"),
         }
     return {
         "n_tiles": len(tile_records),
         "n_sites": len(sites),
         "arms": overall_arms,
+        "baselines": baselines_out,
+        "baseline_prior": priors[0] if priors else None,
         "reference": {
             "nearest_rmse": reference_metric("nearest"),
             "bicubic_rmse": reference_metric("bicubic"),
-            "note": "reference arms score the stored coarse DEM against itself "
-                    "on the shared mask; nonzero only where grids differ",
+            "note": "reference-agreement arms score the stored coarse DEM against "
+                    "itself on the shared mask; nonzero only where grids differ. "
+                    "Not a baseline: improvement/skill are measured against the "
+                    "prior-degradation and constant-mean baselines instead.",
         },
         "per_stratum": per_stratum,
         "per_site": per_site,
@@ -1005,21 +1174,21 @@ def evaluate_acceptance(cfg: dict, aggregate: dict, n_test_sites: int) -> dict:
     else:
         arms = aggregate["arms"]
         min_imp = float(cfg["minimum_improvement"])
-        imp = arms[arm]["improvement_vs_bicubic"]
+        imp = arms[arm]["improvement_vs_baseline"]
         checks["minimum_improvement"] = _criterion(
             imp, threshold=min_imp, ok=lambda v: v >= min_imp,
-            status_reason="bicubic baseline is self-referential (RMSE ~ 0): "
-                          "improvement needs an independent/higher-resolution "
-                          "reference (manifest column reference_hr_path is empty)")
+            status_reason="no prior-degradation baseline available (needs "
+                          "--prior-res coarser than every tile gsd)")
         per_stratum = {}
         for stratum, need in (cfg.get("per_stratum_improvement") or {}).items():
             need_f = float(need)
             s_imp = (aggregate["per_stratum"].get(stratum, {}).get("arms", {})
-                     .get(arm, {}).get("improvement_vs_bicubic"))
+                     .get(arm, {}).get("improvement_vs_baseline"))
             per_stratum[stratum] = _criterion(
                 s_imp, threshold=need_f, ok=lambda v, n=need_f: v >= n,
-                status_reason="same self-referential bicubic baseline as the overall "
-                              "improvement check")
+                status_reason="no prior-degradation baseline available for this "
+                              "stratum (needs --prior-res coarser than every "
+                              "tile gsd)")
         checks["per_stratum_improvement"] = per_stratum
         raw_r = arms[arm]["raw_r"]
         min_r = float(cfg["min_raw_correlation"])
@@ -1046,6 +1215,7 @@ def _fmt(value) -> str:
 
 _TILE_CSV_COLUMNS = (
     "tile_id", "site_id", "stratum", "split", "backend", "status", "n_eval_pixels",
+    "reference_std",
     "raw_r", "raw_r_reason", "raw_mae", "raw_rmse", "raw_bias",
     "cal_r", "cal_rmse", "cal_mae", "cal_bias", "scale", "offset", "inliers",
     "warning", "estimate_status", "calibrated_reason", "polarity_inverted",
@@ -1055,20 +1225,32 @@ _TILE_CSV_COLUMNS = (
 
 
 def _write_per_tile_csv(path: Path, tile_records) -> None:
+    columns = list(_TILE_CSV_COLUMNS)
+    for t in tile_records:
+        for name in (t.get("baselines") or {}):
+            for prefix in ("delta_vs_", "improvement_vs_"):
+                if prefix + name not in columns:
+                    columns.append(prefix + name)
     with path.open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=_TILE_CSV_COLUMNS, lineterminator="\n")
+        writer = csv.DictWriter(fh, fieldnames=columns, lineterminator="\n")
         writer.writeheader()
         for t in tile_records:
             base = {
                 "tile_id": t.get("tile_id"), "site_id": t.get("site_id"),
                 "stratum": t.get("stratum"), "split": t.get("split"),
                 "n_eval_pixels": t.get("n_eval_pixels"),
+                "reference_std": t.get("reference_std"),
                 "ref_bicubic_rmse": t.get("reference", {}).get("bicubic", {}).get("rmse"),
                 "ref_nearest_rmse": t.get("reference", {}).get("nearest", {}).get("rmse"),
                 "notes": t.get("notes", ""),
             }
             rows = [{**base, **info, "backend": name}
                     for name, info in (t.get("backends") or {}).items()]
+            rows += [{**base, "backend": name, "status": info.get("status"),
+                      "estimate_status": "baseline", "cal_rmse": info.get("rmse"),
+                      "cal_mae": info.get("mae"), "cal_bias": info.get("bias"),
+                      "cal_r": info.get("r"), "calibrated_reason": info.get("reason")}
+                     for name, info in (t.get("baselines") or {}).items()]
             rows += [{**base, "backend": name, "status": "grid_mismatch",
                       "raw_r_reason": reason}
                      for name, reason in (t.get("skipped_backends") or {}).items()]
@@ -1076,7 +1258,7 @@ def _write_per_tile_csv(path: Path, tile_records) -> None:
                 rows.append({**base, "backend": "",
                              "status": t.get("status", "no_predictions")})
             for row in rows:
-                writer.writerow({c: _fmt(row.get(c)) for c in _TILE_CSV_COLUMNS})
+                writer.writerow({c: _fmt(row.get(c)) for c in columns})
 
 
 def _md_table(headers, rows) -> str:
@@ -1101,25 +1283,43 @@ def _write_markdown(path: Path, payload) -> None:
         f"- split `{payload['run']['split']}`: {agg['n_tiles']} tiles / "
         f"{agg['n_sites']} sites; block={payload['run']['block']} "
         f"guard={payload['run']['guard']} calib_cap={payload['run']['calib_cap']} "
-        f"seed={payload['run']['seed']}",
+        f"seed={payload['run']['seed']} prior_res="
+        + ",".join(f"{r:g}" for r in payload['run'].get('prior_res_m') or [])
+        + " m",
         f"- primary arm (lowest site-weighted RMSE): `{arm}`",
         "",
         "## Overall (site-weighted means)",
         "",
         _md_table(
             ["arm", "cal RMSE (m)", "cal MAE (m)", "bias (m)", "raw r",
-             "delta vs bicubic (m)", "improvement", "valid/low/failed/no_metrics",
-             "failure rate"],
-            [[name, s["cal_rmse"], s["cal_mae"], s["cal_bias"], s["raw_r"],
-              s["delta_vs_bicubic"], s["improvement_vs_bicubic"],
+             "delta vs baseline (m)", "improvement vs baseline", "skill vs const",
+             "valid/low/failed/no_metrics", "failure rate"],
+            [[name + (" *" if s.get("contaminated") else ""),
+              s["cal_rmse"], s["cal_mae"], s["cal_bias"], s["raw_r"],
+              s["delta_vs_baseline"], s["improvement_vs_baseline"],
+              s["skill_vs_const"],
               "{valid}/{low_confidence}/{failed}/{no_metrics}".format(
                   **s["failures"]),
               s["failures"]["failure_rate"]]
              for name, s in agg["arms"].items()]),
         "",
-        f"Reference arms: nearest RMSE {_fmt(agg['reference']['nearest_rmse'])} m, "
-        f"bicubic RMSE {_fmt(agg['reference']['bicubic_rmse'])} m (stored coarse DEM "
-        "scored against itself on the shared mask).",
+    ]
+    if any(s.get("contaminated") for s in agg["arms"].values()):
+        lines += [f"`*` {_CONTAMINATED_REASON}: excluded from the primary-arm "
+                  "choice and from acceptance checks.", ""]
+    base_rows = [[name, b["res_m"], b["value"], b["rmse"], b["mae"], b["bias"],
+                  b["r"], b["n_tiles"]]
+                 for name, b in agg["baselines"].items()]
+    lines += [
+        "## Baselines (site-weighted)",
+        "",
+        _md_table(["baseline", "res (m)", "value (m)", "RMSE (m)", "MAE (m)",
+                   "bias (m)", "r vs reference", "tiles"], base_rows),
+        "",
+        "Reference-agreement arms (stored coarse DEM scored against itself; "
+        "agreement, not accuracy): nearest RMSE "
+        f"{_fmt(agg['reference']['nearest_rmse'])} m, bicubic RMSE "
+        f"{_fmt(agg['reference']['bicubic_rmse'])} m.",
         "",
     ]
     if arm is not None:
@@ -1128,10 +1328,10 @@ def _write_markdown(path: Path, payload) -> None:
             "",
             _md_table(
                 ["stratum", "tiles", "sites", "cal RMSE (m)", "raw r",
-                 "improvement", "failure rate"],
+                 "improvement vs baseline", "failure rate"],
                 [[st, v["n_tiles"], v["n_sites"],
                   v["arms"][arm]["cal_rmse"], v["arms"][arm]["raw_r"],
-                  v["arms"][arm]["improvement_vs_bicubic"],
+                  v["arms"][arm]["improvement_vs_baseline"],
                   v["arms"][arm]["failures"]["failure_rate"]]
                  for st, v in agg["per_stratum"].items()]),
             "",
@@ -1139,10 +1339,10 @@ def _write_markdown(path: Path, payload) -> None:
             "",
             _md_table(
                 ["site", "stratum", "split", "tiles", "cal RMSE (m)", "raw r",
-                 "delta vs bicubic (m)", "failure rate"],
+                 "delta vs baseline (m)", "failure rate"],
                 [[site, v["stratum"], v["split"], v["n_tiles"],
                   v["arms"][arm]["cal_rmse"], v["arms"][arm]["raw_r"],
-                  v["arms"][arm]["delta_vs_bicubic"],
+                  v["arms"][arm]["delta_vs_baseline"],
                   v["arms"][arm]["failures"]["failure_rate"]]
                  for site, v in agg["per_site"].items()]),
             "",
@@ -1185,20 +1385,28 @@ def _write_markdown(path: Path, payload) -> None:
             + ", ".join(f"{name} {agg['bootstrap'][name]['cal_rmse']['n_sites']}"
                         f"/{total_sites}" for name in thin)
             + "); failed tiles stay in the failure counts.")
+    caveats.append(
+        "improvement/skill baselines: prior_Nm = native reference block-averaged "
+        "to N m then cubic-resampled back to the working grid; const_mean = mean "
+        "of the calibration-region reference pixels; skill vs const = "
+        "1 - RMSE/RMSE_const (site-weighted); the acceptance baseline is "
+        f"`{agg.get('baseline_prior')}` (the finest --prior-res).")
     bic = agg["reference"]["bicubic_rmse"]
     if bic is not None and bic < _BICUBIC_SELF_REFERENTIAL_M:
         caveats.append(
-            "the bicubic arm is self-referential on this manifest (RMSE ~ 0): "
-            "'improvement vs bicubic' is NOT measurable until an independent or "
-            "higher-resolution reference is populated (reference_hr_path column).")
+            "the nearest/bicubic reference-agreement arms are self-referential on "
+            "this manifest (RMSE ~ 0: the stored coarse DEM scored against "
+            "itself) - reported for reference agreement only, NOT the improvement "
+            "baseline.")
     leak = [t["tile_id"] for t in payload["tiles"]
             if "FROM A TEST SITE" in (t.get("notes") or "")]
-    if leak and "finetuned" in agg["arms"]:
+    if agg["arms"].get("finetuned", {}).get("contaminated"):
+        leak_note = (" (manifest notes flag test-site validation tiles "
+                     + ", ".join(leak) + ")") if leak else ""
         caveats.append(
-            "finetuned backend: its decoder fine-tuned across most tiles; manifest "
-            "notes flag test-site validation tiles " + ", ".join(leak) + " - treat "
-            "finetuned test-split numbers as contaminated diagnostics, not "
-            "generalization evidence.")
+            "finetuned backend: " + _CONTAMINATED_REASON + leak_note + " - its "
+            "numbers are reported but excluded from the primary-arm choice and "
+            "acceptance checks.")
     tilezen = [t["tile_id"] for t in payload["tiles"]
                if "Tilezen" in (t.get("reference_product") or "")]
     if tilezen:
@@ -1208,8 +1416,8 @@ def _write_markdown(path: Path, payload) -> None:
             "absolute errors are not comparable with Copernicus GLO-30 tiles.")
     caveats.append(
         "raw-arm MAE/RMSE are in relative-depth units (only correlations and the "
-        "calibrated arms are comparable across arms); delta vs bicubic is defined "
-        "for the calibrated arm only.")
+        "calibrated arms are comparable across arms); delta vs baseline is "
+        "defined for the calibrated arm only.")
     caveats.append(
         "the random-split columns are the within-scene diagnostic (optimistic by "
         "construction); headline numbers are spatial-block with guard band.")
@@ -1294,9 +1502,9 @@ def run_benchmark(args) -> dict:
             tile_records.append({
                 **meta_cols, "notes": row.get("notes", ""),
                 "status": "missing_reference", "shape": None, "n_valid": 0,
-                "n_calib_pixels": 0, "n_eval_pixels": 0,
+                "n_calib_pixels": 0, "n_eval_pixels": 0, "reference_std": None,
                 "reference": {"nearest": {}, "bicubic": {}},
-                "backends": {}, "skipped_backends": {}})
+                "baselines": {}, "backends": {}, "skipped_backends": {}})
             print(f"[skip] {tile_id}: reference DEM not found at {dem_path}")
             continue
         dem, meta = dem_source._read_local_geotiff(str(dem_path))
@@ -1313,9 +1521,15 @@ def run_benchmark(args) -> dict:
                 availability[name]["tiles_present"] += 1
             else:
                 availability[name]["tiles_missing"] += 1
+        try:
+            gsd_m = float(row.get("gsd") or "")
+        except ValueError:
+            gsd_m = None
         record = evaluate_tile_arrays(dem, preds, georef=georef, block=args.block,
                                       guard=args.guard, calib_cap=args.calib_cap,
-                                      seed=args.seed)
+                                      seed=args.seed,
+                                      prior_res_m=tuple(args.prior_res),
+                                      gsd_m=gsd_m)
         record.update(meta_cols)
         record["notes"] = row.get("notes", "")
         tile_records.append(record)
@@ -1342,7 +1556,8 @@ def run_benchmark(args) -> dict:
                      "guard_km": args.guard_km, "warnings": validation["warnings"]},
         "run": {"split": args.split, "tiles_evaluated": len(tile_records),
                 "block": args.block, "guard": args.guard,
-                "calib_cap": args.calib_cap, "seed": args.seed},
+                "calib_cap": args.calib_cap, "seed": args.seed,
+                "prior_res_m": [float(r) for r in args.prior_res]},
         "acceptance": {"path": str(acceptance_path),
                        "sha256": _sha256(acceptance_path), "config": cfg,
                        "checks": acceptance["checks"],
@@ -1389,6 +1604,10 @@ def _build_benchmark_parser():
     bench.add_argument("--block", type=int, default=180)
     bench.add_argument("--guard", type=int, default=8)
     bench.add_argument("--calib-cap", type=int, default=2_000_000)
+    bench.add_argument("--prior-res", type=float, nargs="+", default=[90.0, 250.0],
+                       metavar="M",
+                       help="prior-degradation baseline resolutions in ground "
+                            "metres; the first value is the acceptance baseline")
     bench.add_argument("--seed", type=int, default=42)
     bench.add_argument("--guard-km", type=float, default=10.0)
     return parser

@@ -3,14 +3,16 @@
 # model must reach it - not the other way around. Any later edit invalidates
 # previous benchmark results (the harness records this file's sha256).
 #
-# improvement is fractional RMSE reduction vs the bicubic-upsampled reference:
-#   improvement = (rmse_bicubic - rmse_candidate) / rmse_bicubic
-# On manifests without an independent/higher-resolution reference the bicubic
-# arm is self-referential (rmse 0) and improvement is NOT MEASURABLE; the
-# verdict says so instead of pretending the threshold was met or missed.
+# improvement is fractional RMSE reduction vs the prior-degradation baseline
+# (native reference block-averaged to the FIRST --prior-res value, default
+# 90 m, then cubic-resampled back to the working grid):
+#   improvement = (rmse_prior - rmse_candidate) / rmse_prior
+# The coarse-DEM-as-reference (bicubic) arms remain for reporting only,
+# labeled "reference agreement" - they are self-referential on manifests
+# without an independent/higher-resolution reference and are NOT the bar.
 
 benchmark: depthwizard-benchmark-v1
-primary_metric: rmse_delta_vs_bicubic
+primary_metric: improvement_vs_prior_baseline
 minimum_improvement: 0.05
 per_stratum_improvement:
   forested: 0.0
