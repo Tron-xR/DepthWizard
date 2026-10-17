@@ -431,6 +431,11 @@ _DEFAULT_PREDICTION_RUNS = {
     "imele": "benchmark_runs/c3a2841_imele_20261016T155949Z",
     "da2": "benchmark_runs/c3a2841_da2_20261016T162855Z",
 }
+# Below this bicubic-baseline RMSE (m) the baseline is numerically
+# self-referential (the reference scored against itself via the identity
+# reprojection): a fractional "improvement vs bicubic" would divide by float
+# noise. Real interpolation error from a genuinely coarser product is >= 0.1 m.
+_BICUBIC_SELF_REFERENTIAL_M = 0.01
 
 
 class ManifestError(ValueError):
@@ -722,7 +727,7 @@ def evaluate_tile_arrays(dem, predictions: dict, *, georef=None,
             improvement = None
             if cal["rmse"] is not None and bicubic_rmse is not None:
                 delta = cal["rmse"] - bicubic_rmse
-                if bicubic_rmse > 0:
+                if bicubic_rmse > _BICUBIC_SELF_REFERENTIAL_M:
                     improvement = (bicubic_rmse - cal["rmse"]) / bicubic_rmse
             backend.update({
                 "cal_r": cal["correlation"], "cal_rmse": cal["rmse"],
@@ -766,7 +771,12 @@ def _site_weighted(tiles, backend: str, key: str):
 
 
 def _failure_stats(tiles, backend: str) -> dict:
-    """Tiles by arm usability; failed/low_confidence/no-metrics all count."""
+    """Tiles by arm usability; failed/low_confidence/no-metrics all counted.
+
+    failure_rate counts tiles that failed OUTRIGHT (degenerate fit or missing
+    metrics); low_confidence tiles carry a warning but still have measurements
+    and are tracked separately.
+    """
     counts = {"valid": 0, "low_confidence": 0, "failed": 0, "no_metrics": 0}
     for t in tiles:
         if t.get("status") != "ok":
@@ -784,8 +794,8 @@ def _failure_stats(tiles, backend: str) -> dict:
         else:
             counts["failed"] += 1
     n = len(tiles) or 1
-    counts["failure_rate"] = (counts["low_confidence"] + counts["failed"]
-                              + counts["no_metrics"]) / n
+    counts["failure_rate"] = (counts["failed"] + counts["no_metrics"]) / n
+    counts["low_confidence_rate"] = counts["low_confidence"] / n
     return counts
 
 
@@ -823,6 +833,13 @@ def aggregate_records(tile_records, *, bootstrap_iters: int = 1000,
         return {site: float(np.mean(v)) for site, v in per_site.items()}
 
     def arm_summary(tiles, backend):
+        warning_counts: dict = {}
+        for t in tiles:
+            info = t.get("backends", {}).get(backend) or {}
+            for token in (info.get("warning") or "").split(";"):
+                token = token.strip()
+                if token:
+                    warning_counts[token] = warning_counts.get(token, 0) + 1
         summary = {
             "cal_rmse": _site_weighted(tiles, backend, "cal_rmse"),
             "cal_mae": _site_weighted(tiles, backend, "cal_mae"),
@@ -834,6 +851,7 @@ def aggregate_records(tile_records, *, bootstrap_iters: int = 1000,
             "n_tiles": len(tiles),
             "n_sites": len({t["site_id"] for t in tiles}),
             "failures": _failure_stats(tiles, backend),
+            "warning_counts": warning_counts,
         }
         return summary
 
@@ -897,3 +915,492 @@ def aggregate_records(tile_records, *, bootstrap_iters: int = 1000,
         "primary_arm": primary,
         "bootstrap": bootstrap,
     }
+
+
+def _sha256(path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _provenance(manifest_path, acceptance_path, run_dirs) -> dict:
+    """Everything needed to reproduce/attribute a benchmark run."""
+    import subprocess
+
+    import rasterio
+
+    commit, dirty = "unknown", None
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=_REPO_ROOT, capture_output=True,
+            text=True, timeout=10).stdout.strip() or "unknown"
+        dirty = bool(subprocess.run(
+            ["git", "status", "--porcelain"], cwd=_REPO_ROOT, capture_output=True,
+            text=True, timeout=10).stdout.strip())
+    except Exception:
+        pass
+    prov = {
+        "git_commit": commit,
+        "git_dirty": dirty,
+        "repo_root": str(_REPO_ROOT),
+        "manifest_sha256": _sha256(manifest_path),
+        "acceptance_sha256": _sha256(acceptance_path),
+        "python": sys.version.split()[0],
+        "numpy": np.__version__,
+        "rasterio": rasterio.__version__,
+        "gdal": rasterio.__gdal_version__,
+        "prediction_runs": {},
+    }
+    for name, run_dir in run_dirs.items():
+        info = {"dir": str(run_dir), "exists": Path(run_dir).exists()}
+        for fname in ("run.json", "model_info.json", "environment.json"):
+            f = Path(run_dir) / fname
+            if f.exists():
+                try:
+                    info[fname] = json.loads(f.read_text(encoding="utf-8"))
+                except Exception as exc:
+                    info[fname] = f"unreadable: {exc}"
+        prov["prediction_runs"][name] = info
+    return prov
+
+
+def _criterion(value, *, threshold, ok, status_reason=None) -> dict:
+    """One acceptance check: pass/fail/not_measurable + the value behind it."""
+    if value is None:
+        return {"status": "not_measurable", "value": None, "threshold": threshold,
+                "reason": status_reason or "value not available"}
+    return {"status": "pass" if ok(value) else "fail", "value": value,
+            "threshold": threshold, "reason": None}
+
+
+def _verdict_of(checks) -> str:
+    statuses: list = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if isinstance(node.get("status"), str):
+                statuses.append(node["status"])
+                return
+            for value in node.values():
+                walk(value)
+
+    walk(checks)
+    if "fail" in statuses:
+        return "fail"
+    if "not_measurable" in statuses:
+        return "not_measurable"
+    return "pass"
+
+
+def evaluate_acceptance(cfg: dict, aggregate: dict, n_test_sites: int) -> dict:
+    """Pass/fail per frozen threshold. Thresholds come ONLY from the cfg dict."""
+    checks: dict = {}
+    arm = aggregate.get("primary_arm")
+    if arm is None:
+        checks["primary_arm"] = {
+            "status": "fail", "value": None, "threshold": None,
+            "reason": "no backend produced a usable calibrated arm"}
+    else:
+        arms = aggregate["arms"]
+        min_imp = float(cfg["minimum_improvement"])
+        imp = arms[arm]["improvement_vs_bicubic"]
+        checks["minimum_improvement"] = _criterion(
+            imp, threshold=min_imp, ok=lambda v: v >= min_imp,
+            status_reason="bicubic baseline is self-referential (RMSE ~ 0): "
+                          "improvement needs an independent/higher-resolution "
+                          "reference (manifest column reference_hr_path is empty)")
+        per_stratum = {}
+        for stratum, need in (cfg.get("per_stratum_improvement") or {}).items():
+            need_f = float(need)
+            s_imp = (aggregate["per_stratum"].get(stratum, {}).get("arms", {})
+                     .get(arm, {}).get("improvement_vs_bicubic"))
+            per_stratum[stratum] = _criterion(
+                s_imp, threshold=need_f, ok=lambda v, n=need_f: v >= n,
+                status_reason="same self-referential bicubic baseline as the overall "
+                              "improvement check")
+        checks["per_stratum_improvement"] = per_stratum
+        raw_r = arms[arm]["raw_r"]
+        min_r = float(cfg["min_raw_correlation"])
+        checks["min_raw_correlation"] = _criterion(
+            raw_r, threshold=min_r, ok=lambda v: v >= min_r,
+            status_reason="no calibrated tile produced a defined raw correlation")
+        max_fail = float(cfg["max_failure_rate"])
+        checks["max_failure_rate"] = _criterion(
+            arms[arm]["failures"]["failure_rate"], threshold=max_fail,
+            ok=lambda v: v <= max_fail)
+    min_sites = float(cfg["min_test_sites"])
+    checks["min_test_sites"] = _criterion(
+        float(n_test_sites), threshold=min_sites, ok=lambda v: v >= min_sites)
+    return {"checks": checks, "verdict": _verdict_of(checks), "primary_arm": arm}
+
+
+def _fmt(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        return f"{value:.6g}"
+    return str(value)
+
+
+_TILE_CSV_COLUMNS = (
+    "tile_id", "site_id", "stratum", "split", "backend", "status", "n_eval_pixels",
+    "raw_r", "raw_r_reason", "raw_mae", "raw_rmse", "raw_bias",
+    "cal_r", "cal_rmse", "cal_mae", "cal_bias", "scale", "offset", "inliers",
+    "warning", "estimate_status", "calibrated_reason", "polarity_inverted",
+    "delta_vs_bicubic", "improvement_vs_bicubic", "random_rmse", "random_r",
+    "ref_bicubic_rmse", "ref_nearest_rmse", "notes",
+)
+
+
+def _write_per_tile_csv(path: Path, tile_records) -> None:
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=_TILE_CSV_COLUMNS, lineterminator="\n")
+        writer.writeheader()
+        for t in tile_records:
+            base = {
+                "tile_id": t.get("tile_id"), "site_id": t.get("site_id"),
+                "stratum": t.get("stratum"), "split": t.get("split"),
+                "n_eval_pixels": t.get("n_eval_pixels"),
+                "ref_bicubic_rmse": t.get("reference", {}).get("bicubic", {}).get("rmse"),
+                "ref_nearest_rmse": t.get("reference", {}).get("nearest", {}).get("rmse"),
+                "notes": t.get("notes", ""),
+            }
+            rows = [{**base, **info, "backend": name}
+                    for name, info in (t.get("backends") or {}).items()]
+            rows += [{**base, "backend": name, "status": "grid_mismatch",
+                      "raw_r_reason": reason}
+                     for name, reason in (t.get("skipped_backends") or {}).items()]
+            if not rows:
+                rows.append({**base, "backend": "",
+                             "status": t.get("status", "no_predictions")})
+            for row in rows:
+                writer.writerow({c: _fmt(row.get(c)) for c in _TILE_CSV_COLUMNS})
+
+
+def _md_table(headers, rows) -> str:
+    lines = ["| " + " | ".join(headers) + " |",
+             "|" + "|".join("---" for _ in headers) + "|"]
+    for row in rows:
+        lines.append("| " + " | ".join(_fmt(v) for v in row) + " |")
+    return "\n".join(lines)
+
+
+def _write_markdown(path: Path, payload) -> None:
+    meta, agg, acc = payload["meta"], payload["aggregate"], payload["acceptance"]
+    arm = agg["primary_arm"]
+    lines = [
+        "# DepthWizard benchmark",
+        "",
+        f"- git `{meta['git_commit']}` (dirty: {meta['git_dirty']}), rasterio "
+        f"{meta['rasterio']} / GDAL {meta['gdal']}",
+        f"- manifest `{payload['manifest']['path']}` sha256 "
+        f"`{meta['manifest_sha256'][:12]}`; acceptance `{acc['path']}` sha256 "
+        f"`{meta['acceptance_sha256'][:12]}`",
+        f"- split `{payload['run']['split']}`: {agg['n_tiles']} tiles / "
+        f"{agg['n_sites']} sites; block={payload['run']['block']} "
+        f"guard={payload['run']['guard']} calib_cap={payload['run']['calib_cap']} "
+        f"seed={payload['run']['seed']}",
+        f"- primary arm (lowest site-weighted RMSE): `{arm}`",
+        "",
+        "## Overall (site-weighted means)",
+        "",
+        _md_table(
+            ["arm", "cal RMSE (m)", "cal MAE (m)", "bias (m)", "raw r",
+             "delta vs bicubic (m)", "improvement", "valid/low/failed/no_metrics",
+             "failure rate"],
+            [[name, s["cal_rmse"], s["cal_mae"], s["cal_bias"], s["raw_r"],
+              s["delta_vs_bicubic"], s["improvement_vs_bicubic"],
+              "{valid}/{low_confidence}/{failed}/{no_metrics}".format(
+                  **s["failures"]),
+              s["failures"]["failure_rate"]]
+             for name, s in agg["arms"].items()]),
+        "",
+        f"Reference arms: nearest RMSE {_fmt(agg['reference']['nearest_rmse'])} m, "
+        f"bicubic RMSE {_fmt(agg['reference']['bicubic_rmse'])} m (stored coarse DEM "
+        "scored against itself on the shared mask).",
+        "",
+    ]
+    if arm is not None:
+        lines += [
+            "## Per stratum (primary arm)",
+            "",
+            _md_table(
+                ["stratum", "tiles", "sites", "cal RMSE (m)", "raw r",
+                 "improvement", "failure rate"],
+                [[st, v["n_tiles"], v["n_sites"],
+                  v["arms"][arm]["cal_rmse"], v["arms"][arm]["raw_r"],
+                  v["arms"][arm]["improvement_vs_bicubic"],
+                  v["arms"][arm]["failures"]["failure_rate"]]
+                 for st, v in agg["per_stratum"].items()]),
+            "",
+            "## Per site (primary arm)",
+            "",
+            _md_table(
+                ["site", "stratum", "split", "tiles", "cal RMSE (m)", "raw r",
+                 "delta vs bicubic (m)", "failure rate"],
+                [[site, v["stratum"], v["split"], v["n_tiles"],
+                  v["arms"][arm]["cal_rmse"], v["arms"][arm]["raw_r"],
+                  v["arms"][arm]["delta_vs_bicubic"],
+                  v["arms"][arm]["failures"]["failure_rate"]]
+                 for site, v in agg["per_site"].items()]),
+            "",
+        ]
+    lines += ["## Bootstrap (95% CI over sites)", ""]
+    boot_rows = []
+    for name, block in agg["bootstrap"].items():
+        for metric, ci in block.items():
+            boot_rows.append([name, metric, ci["mean"], ci["ci_low"], ci["ci_high"],
+                              ci["n_sites"], ci["iters"]])
+    lines += [_md_table(["arm", "metric", "mean", "ci low", "ci high", "n sites",
+                         "iters"], boot_rows), ""]
+    if arm is not None and agg["arms"][arm]["warning_counts"]:
+        lines += ["## Warning counts (primary arm)", "",
+                  _md_table(["warning", "tiles"],
+                            sorted(agg["arms"][arm]["warning_counts"].items())), ""]
+    lines += [f"## Acceptance verdict: **{acc['verdict'].upper()}**", ""]
+    check_rows = []
+
+    def walk(prefix, node):
+        if isinstance(node, dict) and isinstance(node.get("status"), str):
+            check_rows.append([prefix, node["status"], node.get("value"),
+                               node.get("threshold"), node.get("reason") or ""])
+            return
+        if isinstance(node, dict):
+            for key, value in node.items():
+                walk(f"{prefix}.{key}" if prefix else key, value)
+
+    walk("", acc["checks"])
+    lines += [_md_table(["check", "status", "value", "threshold", "reason"],
+                        check_rows), ""]
+    caveats = []
+    total_sites = len({t["site_id"] for t in payload["tiles"]})
+    thin = sorted(name for name, block in agg["bootstrap"].items()
+                  if "cal_rmse" in block and block["cal_rmse"]["n_sites"] < total_sites)
+    if thin:
+        caveats.append(
+            "arms cover fewer sites than the split has where a calibration fit "
+            "failed outright (bootstrap 'n sites' column: "
+            + ", ".join(f"{name} {agg['bootstrap'][name]['cal_rmse']['n_sites']}"
+                        f"/{total_sites}" for name in thin)
+            + "); failed tiles stay in the failure counts.")
+    bic = agg["reference"]["bicubic_rmse"]
+    if bic is not None and bic < _BICUBIC_SELF_REFERENTIAL_M:
+        caveats.append(
+            "the bicubic arm is self-referential on this manifest (RMSE ~ 0): "
+            "'improvement vs bicubic' is NOT measurable until an independent or "
+            "higher-resolution reference is populated (reference_hr_path column).")
+    leak = [t["tile_id"] for t in payload["tiles"]
+            if "FROM A TEST SITE" in (t.get("notes") or "")]
+    if leak and "finetuned" in agg["arms"]:
+        caveats.append(
+            "finetuned backend: its decoder fine-tuned across most tiles; manifest "
+            "notes flag test-site validation tiles " + ", ".join(leak) + " - treat "
+            "finetuned test-split numbers as contaminated diagnostics, not "
+            "generalization evidence.")
+    tilezen = [t["tile_id"] for t in payload["tiles"]
+               if "Tilezen" in (t.get("reference_product") or "")]
+    if tilezen:
+        caveats.append(
+            f"{len(tilezen)} tiles use the Tilezen terrarium fallback reference "
+            "product with an unpublished vertical datum (manifest notes): their "
+            "absolute errors are not comparable with Copernicus GLO-30 tiles.")
+    caveats.append(
+        "raw-arm MAE/RMSE are in relative-depth units (only correlations and the "
+        "calibrated arms are comparable across arms); delta vs bicubic is defined "
+        "for the calibrated arm only.")
+    caveats.append(
+        "the random-split columns are the within-scene diagnostic (optimistic by "
+        "construction); headline numbers are spatial-block with guard band.")
+    caveats.append(
+        "failed / low_confidence tiles remain in every count; the failure rate "
+        "counts tiles that failed outright (degenerate fit or missing metrics), "
+        "while warning-carrying tiles are listed in the counts column and the "
+        "warning-count table above.")
+    failed = sorted({t["tile_id"] for t in payload["tiles"]
+                     if any((i or {}).get("status") in ("failed", "calibration_error")
+                            for i in (t.get("backends") or {}).values())})
+    if failed:
+        caveats.append(
+            "tiles that hit the calibration fit's degenerate/fallback path in this "
+            "run: " + ", ".join(failed) + " (see per_tile.csv calibrated_reason); "
+            "they stay in every count.")
+    lines += ["## Caveats", ""] + [f"- {c}" for c in caveats] + [""]
+    if payload["manifest"]["warnings"]:
+        lines += ["## Manifest warnings", ""] + [
+            f"- {w}" for w in payload["manifest"]["warnings"]] + [""]
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def run_benchmark(args) -> dict:
+    """The `benchmark` CLI body: manifest -> predictions -> artifacts."""
+    try:
+        import yaml
+    except ImportError as exc:  # pragma: no cover
+        raise SystemExit("PyYAML is required for the benchmark CLI "
+                         "(already present transitively; make it a direct dep "
+                         "if this fires)") from exc
+
+    from . import dem_source
+
+    manifest_path = Path(args.manifest)
+    rows, validation = load_manifest(manifest_path, guard_km=args.guard_km)
+    for warning in validation["warnings"]:
+        print(f"[manifest warning] {warning}")
+
+    acceptance_path = Path(args.acceptance)
+    if not acceptance_path.exists():
+        raise SystemExit(f"acceptance file not found: {acceptance_path}")
+    cfg = yaml.safe_load(acceptance_path.read_text(encoding="utf-8"))
+    required = ("minimum_improvement", "per_stratum_improvement", "max_failure_rate",
+                "min_raw_correlation", "min_test_sites", "bootstrap_iters", "seed")
+    missing = [k for k in required if k not in cfg]
+    if missing:
+        raise SystemExit(f"acceptance file {acceptance_path} is missing: {missing}")
+
+    selected = [r for r in rows if args.split == "all" or r["split"] == args.split]
+    if not selected:
+        raise SystemExit(f"no tiles in split {args.split!r}")
+
+    run_dirs: dict = {}
+    for name, rel in _DEFAULT_PREDICTION_RUNS.items():
+        path = Path(rel)
+        run_dirs[name] = path if path.is_absolute() else _REPO_ROOT / path
+    for override in args.predictions or []:
+        name, sep, path = override.partition("=")
+        if not sep or not name or not path:
+            raise SystemExit(f"--predictions expects BACKEND=DIR, got {override!r}")
+        run_dirs[name] = Path(path)
+    if args.fusion_pred_dir:
+        run_dirs["fusion"] = Path(args.fusion_pred_dir)
+
+    availability = {name: {"dir": str(d), "tiles_present": 0, "tiles_missing": 0}
+                    for name, d in run_dirs.items()}
+    if "fusion" not in run_dirs:
+        availability["fusion"] = {
+            "status": "unavailable", "provided": False,
+            "reason": "phase 3 fusion predictions not provided (--fusion-pred-dir)"}
+
+    tiles_root = Path(args.tiles_root)
+    tile_records = []
+    for row in selected:
+        tile_id = row["tile_id"]
+        meta_cols = {k: row.get(k) for k in (
+            "tile_id", "site_id", "region", "split", "stratum", "sensor", "crs",
+            "gsd", "reference_product", "reference_res_m", "reference_hr_path")}
+        dem_path = tiles_root / row["stratum"] / f"{tile_id}_dem.tif"
+        if not dem_path.exists():
+            tile_records.append({
+                **meta_cols, "notes": row.get("notes", ""),
+                "status": "missing_reference", "shape": None, "n_valid": 0,
+                "n_calib_pixels": 0, "n_eval_pixels": 0,
+                "reference": {"nearest": {}, "bicubic": {}},
+                "backends": {}, "skipped_backends": {}})
+            print(f"[skip] {tile_id}: reference DEM not found at {dem_path}")
+            continue
+        dem, meta = dem_source._read_local_geotiff(str(dem_path))
+        georef = (meta.get("transform"), meta.get("crs"),
+                  meta.get("transform"), meta.get("crs"))
+        preds = {}
+        for name, run_dir in run_dirs.items():
+            fname = f"{tile_id}_relative.npy"
+            if name == "fusion" and not (run_dir / "predictions" / fname).exists():
+                fname = f"{tile_id}_residual.npy"
+            npy = run_dir / "predictions" / fname
+            if npy.exists():
+                preds[name] = np.load(npy)
+                availability[name]["tiles_present"] += 1
+            else:
+                availability[name]["tiles_missing"] += 1
+        record = evaluate_tile_arrays(dem, preds, georef=georef, block=args.block,
+                                      guard=args.guard, calib_cap=args.calib_cap,
+                                      seed=args.seed)
+        record.update(meta_cols)
+        record["notes"] = row.get("notes", "")
+        tile_records.append(record)
+    for name, info in availability.items():
+        if "tiles_present" in info:
+            info["provided"] = True
+            info["status"] = ("unavailable" if info["tiles_present"] == 0
+                              else "partial" if info["tiles_missing"] else "complete")
+
+    aggregate = aggregate_records(tile_records,
+                                  bootstrap_iters=int(cfg["bootstrap_iters"]),
+                                  seed=int(cfg["seed"]))
+    n_test_sites = len({r["site_id"] for r in rows if r["split"] == "test"})
+    acceptance = evaluate_acceptance(cfg, aggregate, n_test_sites)
+
+    split_counts: dict = {}
+    for row in rows:
+        split_counts[row["split"]] = split_counts.get(row["split"], 0) + 1
+
+    payload = {
+        "meta": _provenance(manifest_path, acceptance_path, run_dirs),
+        "manifest": {"path": str(manifest_path), "sha256": _sha256(manifest_path),
+                     "n_tiles_total": len(rows), "splits": split_counts,
+                     "guard_km": args.guard_km, "warnings": validation["warnings"]},
+        "run": {"split": args.split, "tiles_evaluated": len(tile_records),
+                "block": args.block, "guard": args.guard,
+                "calib_cap": args.calib_cap, "seed": args.seed},
+        "acceptance": {"path": str(acceptance_path),
+                       "sha256": _sha256(acceptance_path), "config": cfg,
+                       "checks": acceptance["checks"],
+                       "verdict": acceptance["verdict"],
+                       "primary_arm": acceptance["primary_arm"]},
+        "availability": availability,
+        "aggregate": aggregate,
+        "tiles": tile_records,
+    }
+
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "benchmark.json").write_text(
+        json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    _write_per_tile_csv(out_dir / "per_tile.csv", tile_records)
+    _write_markdown(out_dir / "benchmark.md", payload)
+    print(f"[benchmark] verdict={acceptance['verdict']} "
+          f"primary_arm={aggregate['primary_arm']} sites={aggregate['n_sites']} "
+          f"tiles={aggregate['n_tiles']} -> {out_dir}")
+    return payload
+
+
+def _build_benchmark_parser():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="python -m app.pipeline.evaluation",
+        description="DepthWizard accuracy evaluation + model benchmark harness")
+    sub = parser.add_subparsers(dest="command", required=True)
+    bench = sub.add_parser("benchmark",
+                           help="run the benchmark on cached predictions")
+    default = _REPO_ROOT
+    bench.add_argument("--manifest", default=str(default / "server" / "data" / "manifest.csv"))
+    bench.add_argument("--split", default="test", choices=("train", "val", "test", "all"))
+    bench.add_argument("--out", default=str(default / "results"))
+    bench.add_argument("--tiles-root", default=str(default / "training_data"))
+    bench.add_argument("--acceptance",
+                       default=str(default / "server" / "config" / "acceptance.yaml"))
+    bench.add_argument("--predictions", action="append", default=[],
+                       metavar="BACKEND=DIR",
+                       help="override a backend's prediction run dir (repeatable)")
+    bench.add_argument("--fusion-pred-dir", default=None,
+                       help="run dir with fusion predictions (phase 3; optional)")
+    bench.add_argument("--block", type=int, default=180)
+    bench.add_argument("--guard", type=int, default=8)
+    bench.add_argument("--calib-cap", type=int, default=2_000_000)
+    bench.add_argument("--seed", type=int, default=42)
+    bench.add_argument("--guard-km", type=float, default=10.0)
+    return parser
+
+
+def main(argv=None) -> int:
+    args = _build_benchmark_parser().parse_args(argv)
+    if args.command == "benchmark":
+        run_benchmark(args)
+        return 0
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

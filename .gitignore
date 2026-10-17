@@ -34,6 +34,7 @@ unity-client/Assets/Scripts/Mesh/heal-*
 
 # Benchmark run outputs (large, regenerable; keep run dir per protocol)
 /benchmark_runs/
+/results/
 
 # Frozen server inside client StreamingAssets (too large + long paths)
 unity-client/Assets/StreamingAssets/
@@ -57,8 +58,9 @@ training_data/
 decoder_training/checkpoints/
 decoder_training/checkpoints_tmp/
 
-# Server cached outputs
-server/data/
+# Server cached outputs (runtime only; the benchmark manifest IS tracked)
+server/data/*
+!server/data/manifest.csv
 
 # Large test assets
 sample_images/
