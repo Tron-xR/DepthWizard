@@ -76,6 +76,15 @@ def test_shipped_manifest_validates():
         "appalachians_smokies", "western_ghats", "n_arizona", "mojave", "new_mexico"}
 
 
+def test_shipped_manifest_flags_finetuned_validation_tiles():
+    path = ev._REPO_ROOT / "server" / "data" / "manifest.csv"
+    rows, _ = ev.load_manifest(path)
+    flagged = {r["tile_id"] for r in rows
+               if "finetuned" in (r.get("contaminated_arms") or "").split(";")}
+    assert flagged == {"forested_05", "forested_07", "forested_12", "hilly_11",
+                       "hilly_15", "sparse_02", "sparse_04", "sparse_07"}
+
+
 # ---- spatial block split ---------------------------------------------------- #
 def test_spatial_block_split_disjoint_with_guard():
     from scipy import ndimage
@@ -257,6 +266,21 @@ def test_contaminated_arm_excluded_from_primary_choice():
     # disqualifies it from the choice, not just from the label
     assert agg["arms"]["finetuned"]["cal_rmse"] < agg["arms"]["da2"]["cal_rmse"]
     assert agg["primary_arm"] == "da2"
+
+
+def test_contaminated_flag_is_manifest_driven():
+    # records carrying a manifest column override the hardcoded fallback:
+    # flagging imele leaves finetuned clean, and vice versa
+    dem = _ramp()
+    good = (5.0 + 0.2 * (dem - float(dem.min()))).astype("float32")
+    rec = ev.evaluate_tile_arrays(dem, {"finetuned": good, "imele": good},
+                                  block=20, guard=2, seed=1)
+    rec.update({"tile_id": "t1", "site_id": "s", "stratum": "hilly",
+                "split": "test", "contaminated_arms": ["imele"]})
+    agg = ev.aggregate_records([rec], bootstrap_iters=10, seed=1)
+    assert agg["arms"]["imele"]["contaminated"] is True
+    assert agg["arms"]["finetuned"]["contaminated"] is False
+    assert agg["primary_arm"] == "finetuned"
 
 
 def test_benchmark_deterministic_for_same_inputs():

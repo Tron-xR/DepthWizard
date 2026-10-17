@@ -421,6 +421,7 @@ _MANIFEST_REQUIRED_COLUMNS = (
 )
 _MANIFEST_OPTIONAL_COLUMNS = (
     "capture_date", "reference_hr_path", "notes", "bounds_wgs84",
+    "contaminated_arms",
 )
 _MANIFEST_COLUMNS = _MANIFEST_REQUIRED_COLUMNS + _MANIFEST_OPTIONAL_COLUMNS
 _BENCHMARK_SPLITS = ("train", "val", "test")
@@ -436,8 +437,9 @@ _DEFAULT_PREDICTION_RUNS = {
 # reprojection): a fractional "improvement vs bicubic" would divide by float
 # noise. Real interpolation error from a genuinely coarser product is >= 0.1 m.
 _BICUBIC_SELF_REFERENTIAL_M = 0.01
-# Backends whose training saw validation/test-site ground truth. Their numbers
-# are reported but never used for primary-arm choice or acceptance checks.
+# Backends whose training saw validation/test-site ground truth. The manifest's
+# `contaminated_arms` column (per tile, semicolon-separated) drives the flag;
+# this set is only the fallback for records that carry no manifest column.
 _CONTAMINATED_ARMS = frozenset({"finetuned"})
 _CONTAMINATED_REASON = "contaminated (trained on val/test sites)"
 
@@ -999,9 +1001,16 @@ def aggregate_records(tile_records, *, bootstrap_iters: int = 1000,
         summary["skill_vs_const"] = (
             1.0 - summary["cal_rmse"] / const_rmse
             if summary["cal_rmse"] is not None and const_rmse else None)
-        summary["contaminated"] = backend in _CONTAMINATED_ARMS
+        summary["contaminated"] = backend in contaminated
         return summary
 
+    def contaminated_set(tiles):
+        flagged = set()
+        for t in tiles:
+            flagged.update(t.get("contaminated_arms") or [])
+        return flagged or set(_CONTAMINATED_ARMS)
+
+    contaminated = contaminated_set(tile_records)
     overall_arms = {b: arm_summary(tile_records, b) for b in backends}
     per_stratum = {}
     for stratum in strata:
@@ -1501,10 +1510,15 @@ def run_benchmark(args) -> dict:
         meta_cols = {k: row.get(k) for k in (
             "tile_id", "site_id", "region", "split", "stratum", "sensor", "crs",
             "gsd", "reference_product", "reference_res_m", "reference_hr_path")}
+        contaminated_arms = [
+            token.strip()
+            for token in (row.get("contaminated_arms") or "").replace(",", ";").split(";")
+            if token.strip()]
         dem_path = tiles_root / row["stratum"] / f"{tile_id}_dem.tif"
         if not dem_path.exists():
             tile_records.append({
                 **meta_cols, "notes": row.get("notes", ""),
+                "contaminated_arms": contaminated_arms,
                 "status": "missing_reference", "shape": None, "n_valid": 0,
                 "n_calib_pixels": 0, "n_eval_pixels": 0, "reference_std": None,
                 "reference": {"nearest": {}, "bicubic": {}},
@@ -1536,6 +1550,7 @@ def run_benchmark(args) -> dict:
                                       gsd_m=gsd_m)
         record.update(meta_cols)
         record["notes"] = row.get("notes", "")
+        record["contaminated_arms"] = contaminated_arms
         tile_records.append(record)
     for name, info in availability.items():
         if "tiles_present" in info:
