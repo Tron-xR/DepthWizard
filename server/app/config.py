@@ -70,6 +70,15 @@ DA3_BASE_MODEL: str = os.environ.get("DEPTHWIZARD_DA3_BASE_MODEL", "")
 DA3MONO_LARGE_MODEL: str = os.environ.get("DEPTHWIZARD_DA3MONO_LARGE_MODEL", "")
 DA3_LARGE_MODEL: str = os.environ.get("DEPTHWIZARD_DA3_LARGE_MODEL", "")
 DA3_GIANT_MODEL: str = os.environ.get("DEPTHWIZARD_DA3_GIANT_MODEL", "")
+# RS height backends (RS3DAda / altimap-height): strictly opt-in, one env var
+# per checkpoint (value = HF repo id, local .pth path, or snapshot dir; empty =
+# disabled; more than one set is an error). Unlike the DA3 arms these emit
+# metric nDSM (metres), scored by the ndsm/dsm evaluation modes. Licences:
+# weights MIT; altimap v2 is additionally trained on SynRS3D and its model
+# card says non-commercial - flagged in every output (depth.RS_BACKENDS).
+RS3DADA_MODEL: str = os.environ.get("DEPTHWIZARD_RS3DADA_MODEL", "")
+ALTIMAP_V1_MODEL: str = os.environ.get("DEPTHWIZARD_ALTIMAP_V1_MODEL", "")
+ALTIMAP_V2_MODEL: str = os.environ.get("DEPTHWIZARD_ALTIMAP_V2_MODEL", "")
 
 # Optional prediction-artifact export root. Artifacts are written ONLY when a
 # request opts in (e.g. /evaluate?save_artifacts=true), under

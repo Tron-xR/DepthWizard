@@ -138,6 +138,8 @@ _INFERENCE_STACK = (
     "server/app/pipeline/depth.py",
     "server/app/pipeline/imele.py",
     "server/app/pipeline/decoder_head.py",
+    "server/app/pipeline/rs_height.py",
+    "server/app/pipeline/rs_dpt.py",
 )
 
 
@@ -447,6 +449,20 @@ def _da3_map() -> dict:
     return {slug: (attr, default) for slug, attr, default in DA3_BACKENDS}
 
 
+def _rs_map() -> dict:
+    """{slug: (config attr, filename, license_note)} for the RS height backends."""
+    from app.pipeline.depth import RS_BACKENDS
+
+    return {slug: (attr, filename, note)
+            for slug, attr, _repo, filename, note in RS_BACKENDS}
+
+
+def _prediction_suffix(identity: dict) -> str:
+    """Prediction file suffix: metric nDSM arms save metres, not rDSM."""
+    return ("_ndsm" if identity["model"].get("output_kind") == "ndsm_metres"
+            else "_relative")
+
+
 def _force_backend(backend: str, model_path: Optional[str]) -> None:
     from app import config
 
@@ -455,6 +471,8 @@ def _force_backend(backend: str, model_path: Optional[str]) -> None:
     config.FINETUNED_MODEL_PATH = ""
     config.IMELE_MODEL_PATH = ""
     for attr, _default in _da3_map().values():
+        setattr(config, attr, "")
+    for attr, _filename, _note in _rs_map().values():
         setattr(config, attr, "")
     if backend == "pix2pix":
         if not config.TF_MODEL_PATH:
@@ -477,8 +495,19 @@ def _force_backend(backend: str, model_path: Optional[str]) -> None:
         attr, default = _da3_map()[backend]
         setattr(config, attr, model_path or default)
         config.TF_MODEL_PATH = ""
+    elif backend in _rs_map():
+        attr, _filename, _note = _rs_map()[backend]
+        # model_path overrides the default HF repo id (local .pth / snapshot dir)
+        setattr(config, attr, model_path or _rs_default(backend))
+        config.TF_MODEL_PATH = ""
     else:
         raise SystemExit(f"unknown backend: {backend}")
+
+
+def _rs_default(slug: str) -> str:
+    from app.pipeline.depth import RS_BACKENDS
+
+    return next(repo for s, _attr, repo, _fn, _note in RS_BACKENDS if s == slug)
 
 
 def _model_info(backend: str) -> dict:
@@ -494,6 +523,7 @@ def _model_info(backend: str) -> dict:
     expected = {"pix2pix": "pix2pix", "imele": "imele", "finetuned": "finetuned",
                 "depth_anything": "depth_anything"}
     expected.update({s: s for s in _da3_map()})
+    expected.update({s: s for s in _rs_map()})
     expected = expected.get(backend)
     if expected and slug != expected:
         raise RuntimeError(f"backend mismatch: asked for {backend}, loaded {slug}")
@@ -504,6 +534,19 @@ def _model_info(backend: str) -> dict:
         return {"slug": slug, "identifier": ident,
                 "file_sha256": {prov["weight_file"]: prov["weight_sha256"]},
                 "hf_repo_id": prov["repo_id"], "hf_revision": prov["revision"]}
+    if backend in _rs_map():
+        # metric RS height checkpoint: hub revision + weight sha256 + licence
+        # note (altimap v2 is non-commercial - the flag must reach the run)
+        # + compute settings (device, VRAM cap) + pinned DINOv2 backbone code
+        _attr, filename, note = _rs_map()[backend]
+        prov = depth.rs_checkpoint_provenance(ident, filename, note)
+        return {"slug": slug, "identifier": ident,
+                "output_kind": "ndsm_metres",
+                "file_sha256": {prov["weight_file"]: prov["weight_sha256"]},
+                "hf_repo_id": prov["repo_id"], "hf_revision": prov["revision"],
+                "license_note": prov["license_note"],
+                "compute": prov["compute"],
+                "backbone_dinov2": prov["backbone_dinov2"]}
     hashes = {}
     p = Path(ident)
     if p.is_file():
@@ -619,10 +662,17 @@ def _rgb_meta(path: Path) -> Optional[dict]:
                 "transform": tuple(src.transform)[:6], "bounds": tuple(src.bounds)}
 
 
-def _default_infer(rgb_hwc: np.ndarray) -> np.ndarray:
-    from app.pipeline.depth import infer_relative_dsm
+_TILE_GSD_M = 1.0  # frozen benchmark tiles are the 1 m Swiss grids
 
-    return infer_relative_dsm(rgb_hwc)
+
+def _default_infer(rgb_hwc: np.ndarray) -> np.ndarray:
+    from app.pipeline import depth
+
+    if depth.active_output_kind() == "ndsm_metres":
+        # gsd-aware: altimap resamples to its 0.33 m/px target and back;
+        # RS3DAda (0.05-1.0 m census) ignores it and runs native.
+        return depth.infer_ndsm_metres(rgb_hwc, gsd_in=_TILE_GSD_M)
+    return depth.infer_relative_dsm(rgb_hwc)
 
 
 def _apply_seed(seed: int) -> None:
@@ -654,12 +704,16 @@ def _cache_sidecar(npy_path: Path) -> Path:
 def _write_prediction(run_dir: Path, tile: Tile, rdsm: np.ndarray, identity: dict) -> Path:
     """Save predictions/<tile>_relative.npy plus its identity sidecar.
 
+    Metric RS height backends save <tile>_ndsm.npy instead: their array is
+    nDSM in metres, not 0..1 rDSM, and evaluation.py --mode ndsm/dsm reads the
+    two suffixes with exactly those semantics.
+
     The sidecar pins the inputs (rgb/dem sha256 + array shape/dtype), the model
     (backend slug, identifier, file hashes), the seed and the inference-code
     fingerprint that produced this array. A later --reuse-predictions run only
     accepts the cache when every one of those still matches.
     """
-    p = run_dir / "predictions" / f"{tile.tile_id}_relative.npy"
+    p = run_dir / "predictions" / f"{tile.tile_id}{_prediction_suffix(identity)}.npy"
     p.parent.mkdir(parents=True, exist_ok=True)
     np.save(p, rdsm.astype("float32"))
     payload = {
@@ -691,7 +745,7 @@ def _validate_cached_prediction(tile: Tile, dem: np.ndarray, reuse_dir: Path,
     "legacy_unverified" and accepted only with allow_unverified=True. Anything
     rejected -> reason explains the miss and the caller re-runs inference.
     """
-    cached = reuse_dir / f"{tile.tile_id}_relative.npy"
+    cached = reuse_dir / f"{tile.tile_id}{_prediction_suffix(identity)}.npy"
     if not cached.is_file():
         return None, None, "not cached"
     rdsm = np.load(cached)
@@ -1355,6 +1409,14 @@ def _limitations(summary: dict) -> list:
     if backend in _CONTROL_BACKENDS:
         lim.append(f"{backend} control arm: predicts an image statistic (not depth); it bounds "
                    "how much of a score trivial intensity structure alone explains.")
+    if backend in _rs_map() or summary["backend"].get("output_kind") == "ndsm_metres":
+        note = (summary["backend"].get("license_note") or "").strip()
+        lim.append(
+            f"{backend} is a metric nDSM checkpoint: predictions/<tile>_ndsm.npy carries "
+            "height above ground in METRES, not 0..1 rDSM. Any rDSM-protocol score in this "
+            "run dir treats it as a relative surface and is NOT meaningful for this arm - "
+            "score it with evaluation.py --mode ndsm/dsm instead."
+            + (f" Licence: {note}." if note else ""))
     if summary["protocol"] == "historical":
         lim.append("Legacy per-tile split shares pixels of the SAME tile between fit and "
                    "score (80/20 pixel split); adjacent tiles also share scenery. Not a "
