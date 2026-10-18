@@ -1,0 +1,33 @@
+# Frozen acceptance thresholds for the HR (Swiss 1 m) depth benchmark.
+# Committed before any HR training code exists, on purpose: the bar is fixed
+# first, the model must reach it - not the other way around. Any later edit
+# invalidates previous HR results (the harness records this file's sha256,
+# like server/config/acceptance.yaml).
+#
+# primary_metric: the MEDIAN across the frozen test sites of the per-site RMSE
+# reduction against the coarse DEM:
+#   site_rmse(arm) = RMSE of the arm over the pooled evaluation pixels of the
+#                    site's tiles (held-out spatial blocks, deployed
+#                    calibration workflow; temporal-flagged tiles excluded)
+#   reduction      = (site_rmse(coarse_dem) - site_rmse(candidate))
+#                    / site_rmse(coarse_dem)
+# The median (not the mean) is the bar: one site must not carry the verdict.
+# - minimum_improvement: the median per-site reduction must be >= this value.
+# - per_stratum_max_regression: in every stratum, the pooled evaluation RMSE
+#   may be at most this fraction worse than the coarse DEM.
+# - bootstrap: resample the frozen test sites with replacement (bootstrap_iters
+#   times), take the median per-site reduction of each resample; the percentile
+#   CI (bootstrap_confidence) must exclude 0.
+# - min_test_sites: all frozen test sites must be present (see the frozen set
+#   in tests/test_hr_dataset.py); fewer means the run is not_measurable.
+
+benchmark: depthwizard-hr-v1
+primary_metric: median_per_site_rmse_reduction_vs_coarse_dem
+baseline_arm: coarse_dem
+minimum_improvement: 0.10
+per_stratum_max_regression: 0.02
+bootstrap_ci_excludes_zero: true
+bootstrap_iters: 1000
+bootstrap_confidence: 0.95
+min_test_sites: 8
+seed: 42
