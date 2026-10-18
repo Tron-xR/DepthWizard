@@ -49,7 +49,14 @@ __pycache__/
 *.pyc
 *.pyo
 .venv/
+.venv-rs/
 *.egg-info/
+
+# Local model caches for the RS height eval (worktree-local, never shared)
+.hf-cache/
+.torch-cache/
+experiments/rs_eval/smoke_out/
+experiments/rs_eval/runs/
 
 # ML models & weights (too large for git)
 models/
@@ -88,6 +95,7 @@ desktop.ini
 !README.md
 !docs/PROJECT_DOCUMENTATION.md
 !docs/BACKBONE_EVAL_DESIGN.md
+!docs/RS_HEIGHT_EVAL_DESIGN.md
 !docs/benchmarks/**
 !docs/CHANGELOG.md
 !docs/DATA_SOURCES.md

@@ -59,6 +59,45 @@ def _selected_da3():
     return selected[0] if selected else None
 
 
+# Remote-sensing height backends (opt-in, metric nDSM in metres; scored by the
+# ndsm/dsm evaluation modes, see docs/RS_HEIGHT_EVAL_DESIGN.md). Same
+# single-select contract as DA3. ``filename`` pins the weight file inside the
+# repo (altimap has no revision tags - the path IS the version: root
+# best.pth = v1, v2/best.pth = v2). Licences: weights MIT; altimap v2 trains
+# in part on SynRS3D and its model card says non-commercial, so every output
+# of that arm carries the note reported here.
+RS_BACKENDS = (
+    ("rs3dada", "RS3DADA_MODEL", "JTRNEO/RS3DAda",
+     "RS3DAda_vitl_DPT_height.pth",
+     "weights MIT; trained on SynRS3D (dataset licence disputed: HF card "
+     "CC BY-NC 4.0 vs Zenodo CC BY 4.0) - see docs/RS_HEIGHT_EVAL_DESIGN.md"),
+    ("altimap_v1", "ALTIMAP_V1_MODEL", "Dilavesh/altimap-height",
+     "best.pth",
+     "weights MIT; trained on GAMUS (CC BY 4.0)"),
+    ("altimap_v2", "ALTIMAP_V2_MODEL", "Dilavesh/altimap-height",
+     "v2/best.pth",
+     "weights MIT but trained in part on SynRS3D; model card says "
+     "NON-COMMERCIAL - keep this flag on every output of this arm"),
+)
+
+
+def _selected_rs():
+    """(slug, model_id, filename, license_note) of the single configured RS
+    backend, or None. More than one configured is an error (same reason as
+    _selected_da3)."""
+    selected = [(slug, getattr(config, attr), filename, note)
+                for slug, attr, _repo, filename, note in RS_BACKENDS
+                if getattr(config, attr)]
+    if len(selected) > 1:
+        raise DepthModelError(
+            "multiple RS height backends configured ("
+            + ", ".join(slug for slug, *_ in selected)
+            + "): set exactly one DEPTHWIZARD_RS3DADA_MODEL / "
+            "DEPTHWIZARD_ALTIMAP_V1_MODEL / DEPTHWIZARD_ALTIMAP_V2_MODEL "
+            "env var or none")
+    return selected[0] if selected else None
+
+
 def get_depth_model() -> Optional[object]:
     """Return the cached model/pipeline or None if unavailable."""
     return _model_cache.get("model")
@@ -80,6 +119,8 @@ def backend_slug() -> str:
             return "imele"
         if name == "_Da3ModelBackend":
             return model.slug
+        if name == "_RsHeightBackend":
+            return model.slug
         if name == "_FinetunedDepthBackend":
             return "finetuned"
         return "depth_anything"
@@ -87,6 +128,9 @@ def backend_slug() -> str:
         return "finetuned"
     if config.IMELE_MODEL_PATH:
         return "imele"
+    rs = _selected_rs()
+    if rs is not None:
+        return rs[0]
     da3 = _selected_da3()
     if da3 is not None:
         return da3[0]
@@ -101,12 +145,31 @@ def model_identifier() -> str:
         return config.FINETUNED_MODEL_PATH
     if config.IMELE_MODEL_PATH:
         return config.IMELE_MODEL_PATH
+    rs = _selected_rs()
+    if rs is not None:
+        return rs[1]
     da3 = _selected_da3()
     if da3 is not None:
         return da3[1]
     if config.TF_MODEL_PATH:
         return config.TF_MODEL_PATH
     return config.DEFAULT_DEPTH_MODEL
+
+
+def active_output_kind() -> str:
+    """'ndsm_metres' when the configured/loaded backend emits metric nDSM
+    (RS height checkpoints), else 'relative' (every DA2/DA3/GAN/HF backend).
+
+    Mirrors _load_model's dispatch order so callers (benchmark_tiles) know
+    which inference entry point to use WITHOUT loading the model first.
+    """
+    model = _model_cache.get("model")
+    if model is not None:
+        return getattr(model, "output_kind", "relative")
+    if not config.FINETUNED_MODEL_PATH and not config.IMELE_MODEL_PATH:
+        if _selected_rs() is not None:
+            return "ndsm_metres"
+    return "relative"
 
 
 class _TfSavedModel:
@@ -307,6 +370,92 @@ class _Da3ModelBackend:
         return {"depth": depth}
 
 
+class _RsHeightBackend:
+    """Metric RS height adapter (RS3DAda / altimap-height, opt-in).
+
+    Unlike every other backend this one emits nDSM in METRES (raw linear
+    regression head): ``output_kind = "ndsm_metres"`` marks it so the
+    relative-depth inversion/normalization never touches it and
+    ``infer_ndsm_metres`` is the only supported entry point. Native-grid
+    windowed inference lives in rs_height.py (518 px windows / bf16 - the box
+    has 4 GB VRAM; see docs/RS_HEIGHT_EVAL_DESIGN.md). ``license_note`` is
+    carried on the instance so run artifacts can flag altimap v2's
+    non-commercial training data. Imported lazily so servers without an RS
+    backend never import torch.
+    """
+    output_kind = "ndsm_metres"
+    invert_depth = False  # not a relative-depth model; stable contract for callers
+
+    def __init__(self, slug: str, model_id: str, filename: str,
+                 license_note: Optional[str] = None):
+        from . import rs_height
+
+        self.slug = slug
+        self.model_id = model_id
+        self.filename = filename
+        self.license_note = license_note
+        self.path = str(rs_height.resolve_weight_path(model_id, filename))
+        self._model, self.device = rs_height.load_model(self.path)
+        # altimap documents a 0.33 m/px target (GAMUS): callers pass gsd_in and
+        # the RGB is resampled to this before inference. RS3DAda was trained on
+        # 0.05-1.0 m bins, so a 1 m Swiss tile is native for it (no resample).
+        self.model_gsd = 0.33 if slug.startswith("altimap") else None
+        # altimap documents non-negative heights; RS3DAda's export path has no
+        # clip, so it stays unclamped (per-checkpoint rule, never per-tile).
+        self.clamp_min = 0.0 if slug.startswith("altimap") else None
+
+    def infer_metres(self, rgb: np.ndarray,
+                     gsd_in: Optional[float] = None) -> np.ndarray:
+        from . import rs_height
+
+        return rs_height.predict_height(self._model, rgb, device=self.device,
+                                        clamp_min=self.clamp_min,
+                                        gsd_in=gsd_in, gsd_model=self.model_gsd)
+
+    def __call__(self, pil):
+        return {"depth": self.infer_metres(np.asarray(pil.convert("RGB")))}
+
+
+def rs_checkpoint_provenance(model_id: str, filename: str,
+                             license_note: Optional[str] = None) -> dict:
+    """Pinned weight provenance for one RS height checkpoint.
+
+    Same contract as da3_checkpoint_provenance: ``repo_id``, ``revision``
+    (hub commit sha the snapshot is pinned to, None for a local path/pickle),
+    ``weight_file`` and ``weight_sha256``, plus the checkpoint's
+    ``license_note`` (non-commercial flags must survive into run artifacts).
+    Also records the compute settings the loaded model used (``compute``:
+    device, device source, CUDA device count, VRAM cap fraction) and the
+    pinned DINOv2 backbone code (``backbone_dinov2``: commit sha + zip
+    sha256). Raises DepthModelError when the weight file is missing.
+    """
+    import hashlib
+    from pathlib import Path
+
+    from . import rs_dpt, rs_height
+
+    weight = rs_height.resolve_weight_path(model_id, filename)
+    if Path(model_id).exists():
+        repo_id, revision = model_id, None
+    else:
+        repo_id = model_id
+        revision = weight.resolve().parents[len(Path(filename).parts) - 1].name
+    h = hashlib.sha256()
+    with open(weight, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return {
+        "repo_id": repo_id,
+        "revision": revision,
+        "snapshot": str(weight.parent),
+        "weight_file": filename,
+        "weight_sha256": h.hexdigest(),
+        "license_note": license_note,
+        "compute": rs_height.compute_info(),
+        "backbone_dinov2": rs_dpt.dinov2_source_info(),
+    }
+
+
 def da3_checkpoint_provenance(model_id: str) -> dict:
     """Pinned weight provenance for one DA3 checkpoint.
 
@@ -353,9 +502,16 @@ def _load_model():
     if config.IMELE_MODEL_PATH:
         return _ImeleModelBackend(config.IMELE_MODEL_PATH)
 
-    # Configured DA3 outranks TF/HF: TF_MODEL_PATH is auto-discovered when
-    # models/pix2pix exists, so a DA3 opt-in must be checked before it.
+    # Configured RS/DA3 outrank TF/HF: TF_MODEL_PATH is auto-discovered when
+    # models/pix2pix exists, so an opt-in must be checked before it.
+    rs = _selected_rs()
     da3 = _selected_da3()
+    if rs is not None and da3 is not None:
+        raise DepthModelError(
+            f"both an RS height backend ({rs[0]}) and a DA3 backend ({da3[0]}) "
+            "are configured: set exactly one DEPTHWIZARD_*_MODEL env var")
+    if rs is not None:
+        return _RsHeightBackend(rs[0], rs[1], rs[2], rs[3])
     if da3 is not None:
         return _Da3ModelBackend(*da3)
 
@@ -481,3 +637,36 @@ def _normalize_01(x: np.ndarray) -> np.ndarray:
     if hi - lo == 0:
         return np.zeros_like(x, dtype="float32")
     return ((x - lo) / (hi - lo)).astype("float32")
+
+
+def infer_ndsm_metres(rgb: np.ndarray,
+                      gsd_in: Optional[float] = None) -> np.ndarray:
+    """Run a metric RS height backend -> nDSM in metres (H,W) float32.
+
+    Strictly for ``ndsm_metres`` backends (RS3DAda / altimap-height): the raw
+    regression head, NO depth-sign inversion and NO 0..1 normalization, on the
+    input pixel grid. Raises for relative-depth backends - their output has no
+    metric scale; use infer_relative_dsm for those.
+
+    ``gsd_in`` = the input's GSD in m/px. When the checkpoint documents a
+    target GSD (altimap: 0.33), the backend resamples the RGB to it and the
+    metre map back to the input grid; RS3DAda (0.05-1.0 m training census)
+    runs native regardless. Output values are metres on both grids.
+    """
+    from PIL import Image
+
+    model = ensure_model()
+    if getattr(model, "output_kind", None) != "ndsm_metres":
+        raise DepthModelError(
+            f"backend {backend_slug()!r} is relative-depth, not a metric nDSM "
+            "model: infer_ndsm_metres needs one configured RS height backend "
+            "(DEPTHWIZARD_RS3DADA_MODEL / DEPTHWIZARD_ALTIMAP_V1_MODEL / "
+            "DEPTHWIZARD_ALTIMAP_V2_MODEL)")
+
+    arr = np.asarray(rgb)
+    if arr.ndim == 3 and arr.shape[2] == 4:
+        arr = arr[:, :, :3]
+    if arr.ndim == 2:
+        arr = np.stack([arr] * 3, axis=-1)
+    pil = Image.fromarray(arr.astype("uint8") if arr.max() <= 255 else arr)
+    return model.infer_metres(np.asarray(pil), gsd_in=gsd_in)
