@@ -115,12 +115,15 @@ def _water_box():
 
 def test_site_table_balanced_and_valid():
     rows = hr_dataset.build_site_rows()
-    assert len(rows) == 28
+    assert len(rows) == 60
     assert hr_dataset.validate_sites(rows) == []
     for stratum in hr_dataset.STRATA:
         splits = [r["split"] for r in rows if r["stratum"] == stratum]
-        expected = [s for s, count in hr_dataset.SPLIT_SIZES.items()
-                    for _ in range(count)]
+        expected = ([s for s, count in hr_dataset.SPLIT_SIZES.items()
+                     for _ in range(count)]
+                    + ["val"] * hr_dataset.EXTRA_VAL_PER_STRATUM
+                    + ["train"] * (hr_dataset.EXTRA_SITES_PER_STRATUM
+                                   - hr_dataset.EXTRA_VAL_PER_STRATUM))
         assert sorted(splits) == sorted(expected)
 
 
@@ -128,6 +131,14 @@ def test_frozen_test_sites():
     rows = hr_dataset.build_site_rows()
     test_sites = {r["site_id"] for r in rows if r["split"] == "test"}
     assert test_sites == FROZEN_TEST_SITES
+
+
+def test_extension_sites_are_train_or_val_only():
+    rows = hr_dataset.build_site_rows()
+    extension = [r for r in rows
+                 if r["site_id"] not in hr_dataset.FROZEN_SPLITS]
+    assert len(extension) == 32
+    assert {r["split"] for r in extension} == {"val", "train"}
 
 
 def test_committed_site_table_matches_seed():
@@ -342,11 +353,13 @@ def test_shipped_hr_manifest_validates():
         pytest.skip("hr dataset not built yet")
     rows, validation = evaluation.load_manifest(path, guard_km=10.0)
     assert validation["errors"] == []
-    assert len(rows) == 112
+    assert len(rows) == 240
     site_splits = {}
     for row in rows:
         site_splits.setdefault(row["site_id"], set()).add(row["split"])
         assert (evaluation._REPO_ROOT / row["reference_hr_path"]).exists()
         assert row["datum_offset_m"]
     assert all(len(splits) == 1 for splits in site_splits.values())
-    assert sum(1 for r in rows if r["temporal_flag"] == "True") == 6
+    # 6 Phase-2 tiles (napf/samedan) + 28 extension tiles on sheets whose
+    # newest swissSURFACE3D epoch predates the newest SWISSIMAGE scene.
+    assert sum(1 for r in rows if r["temporal_flag"] == "True") == 34

@@ -2,10 +2,12 @@
 
 Pipeline: ``sites`` -> ``download`` -> ``build``:
 
-1. Site design: 28 independent sites, 7 per stratum (urban / sparse alpine
-   bare / hilly / forest), split train/val/test BY SITE from a fixed seed.
-   The committed site table is ``server/data/hr_sites.csv``; test sites are
-   frozen (see tests/test_hr_dataset.py).
+1. Site design: 60 independent sites, 15 per stratum (urban / sparse alpine
+   bare / hilly / forest), split train/val/test BY SITE. The committed site
+   table is ``server/data/hr_sites.csv``. The 28 Phase-2 sites keep their
+   frozen assignments (test sites are pinned in tests/test_hr_dataset.py);
+   the 32-site extension batch is val/train only, drawn per stratum from the
+   seed.
 2. Download (resumable, sha256-indexed via hr_download): SWISSIMAGE DOP10
    (RGB), swissSURFACE3D Raster (DSM), swissALTI3D (DTM) from the swisstopo
    STAC, Copernicus GLO-30 from the public AWS bucket (reusing
@@ -52,7 +54,9 @@ HR_ROOT = DATA_DIR / "hr"
 
 WORK_CRS = "EPSG:2056"
 STRATA = ("urban", "sparse", "hilly", "forest")
-SPLIT_SIZES = {"test": 2, "val": 2, "train": 3}
+SPLIT_SIZES = {"test": 2, "val": 2, "train": 3}  # Phase-2 sites, frozen
+EXTRA_SITES_PER_STRATUM = 8  # later-phase extension batch
+EXTRA_VAL_PER_STRATUM = 3    # of the extension sites; the rest go to train
 SEED = 42
 DEFAULT_GSD_M = 1.0
 DEFAULT_TILE_PX = 512
@@ -82,7 +86,8 @@ WATER_LAYER_HINTS = ("lake", "stagnantwater", "flowingwater", "wasser", "see")
 
 # Site design: well-known Swiss locations, stratum assigned from the dominant
 # land cover / terrain of the ~1 km footprint (rationale column records why).
-# Frozen after commit: test sites are pinned in the test suite.
+# Frozen after commit: test sites are pinned in the test suite. The second
+# block below is the val/train-only extension batch (Phase-4 prep).
 SITES = (
     ("zurich_center", "urban", 8.5417, 47.3769, "dense city core, mixed roofs"),
     ("basel_center", "urban", 7.5886, 47.5596, "city core at the Rhine"),
@@ -113,7 +118,74 @@ SITES = (
      "UNESCO beech forest, Monte San Giorgio (nDSM-verified)"),
     ("aegeri", "forest", 8.6000, 47.1000, "mixed forest south of Unteraegeri (nDSM-verified)"),
     ("randen", "forest", 8.5500, 47.7500, "wooded Randen plateau"),
+    # extension batch (all val/train, same strata)
+    ("st_gallen", "urban", 9.3767, 47.4245, "city core, dense blocks"),
+    ("thun", "urban", 7.6283, 46.7584, "city core at the Aare outlet"),
+    ("biel", "urban", 7.2467, 47.1368, "bilingual city on the Jura foot"),
+    ("neuchatel", "urban", 6.9310, 46.9920, "lakeside city core"),
+    ("fribourg", "urban", 7.1620, 46.8065, "old town on the Sarine loop"),
+    ("chur", "urban", 9.5329, 46.8508, "alpine city core"),
+    ("lugano", "urban", 8.9511, 46.0101, "city core at the lake"),
+    ("schaffhausen", "urban", 8.6333, 47.6978, "Rhine city core"),
+    ("gornergrat", "sparse", 7.7850, 45.9830, "bare high-alpine slopes above Zermatt"),
+    ("lac_dix", "sparse", 7.4050, 46.0854, "bare rock and moraine above the Grande Dixence dam"),
+    ("andermatt", "sparse", 8.5944, 46.6356, "bare pass terrain around the Gotthard"),
+    ("san_bernardino", "sparse", 9.1906, 46.4622, "bare alpine pass slopes, scree"),
+    ("julier", "sparse", 9.7285, 46.4690, "bare pass terrain, Engadin side"),
+    ("fluela", "sparse", 9.9470, 46.7490, "bare high pass above Davos"),
+    ("ofenpass", "sparse", 10.2800, 46.6400, "Ofenpass, bare alpine valley walls"),
+    ("grosse_scheidegg", "sparse", 8.1000, 46.6500, "bare alpine slopes above Grindelwald"),
+    ("toggenburg", "hilly", 9.2800, 47.3200, "rolling pre-alpine meadows"),
+    ("entlebuch", "hilly", 8.0500, 46.9900, "pre-alpine hill country"),
+    ("schwarzsee", "hilly", 7.2696, 46.6664, "pre-alpine pastures west of Schwarzsee"),
+    ("val_de_travers", "hilly", 6.6000, 46.9300, "Jura valley, pastures and slopes"),
+    ("simmental", "hilly", 7.4000, 46.5500, "steep alpine valley meadows"),
+    ("leventina", "hilly", 8.8500, 46.5000, "steep Ticino valley slopes"),
+    ("goms", "hilly", 8.2500, 46.4700, "upper Valais valley, meadows"),
+    ("val_mustair", "hilly", 10.4400, 46.5700, "Val Muestair, terraced pastures"),
+    ("gempen", "forest", 7.6600, 47.4750, "wooded Gempen plateau above Basel"),
+    ("pfannenstiel", "forest", 8.6500, 47.2800, "forested ridge above the lake"),
+    ("alptal", "forest", 8.6500, 47.0500, "forested pre-alpine valley slopes"),
+    ("arosa", "forest", 9.6800, 46.7800, "forested valley slopes above Arosa"),
+    ("val_onernonica", "forest", 8.5500, 46.3500, "chestnut and beech slopes, Ticino"),
+    ("jaunpass", "forest", 7.3500, 46.6000, "forested pass slopes"),
+    ("marchairuz", "forest", 6.2500, 46.5500, "Jura crest forest (col du Marchairuz)"),
+    ("brevine", "forest", 6.6000, 46.9800, "forested Jura valley (La Brevine)"),
 )
+
+# Phase-2 assignments, frozen at commit 02bfae2: extension sites must never
+# move these (any change re-labels already-built tiles). The test sites within
+# are pinned in tests/test_hr_dataset.py.
+FROZEN_SPLITS = {
+    "aegeri": "test",
+    "appenzell": "train",
+    "arolla": "test",
+    "bachtel": "train",
+    "basel_center": "train",
+    "bern_center": "train",
+    "chasseral": "test",
+    "emmental": "val",
+    "gantrisch": "val",
+    "geneva_center": "test",
+    "grimsel": "val",
+    "gruyeres": "train",
+    "la_dole": "val",
+    "lausanne_center": "test",
+    "luzern_center": "val",
+    "maggia_valley": "train",
+    "monte_san_giorgio": "train",
+    "napf": "test",
+    "randen": "val",
+    "saas_fee": "test",
+    "samedan": "train",
+    "sihlwald": "test",
+    "simplon": "train",
+    "susten": "train",
+    "vaud_jura": "train",
+    "winterthur": "train",
+    "zermatt": "val",
+    "zurich_center": "val",
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -134,24 +206,33 @@ def lv95_to_wgs84(east: float, north: float) -> tuple:
     return float(lons[0]), float(lats[0])
 
 
-def assign_splits(sites, *, sizes=SPLIT_SIZES, seed: int = SEED) -> dict:
-    """Split BY SITE: within each stratum, shuffle deterministically and take
-    test/val/train slices. One tile never crosses a split."""
+def assign_splits(sites, *, seed: int = SEED) -> dict:
+    """Split BY SITE. The Phase-2 sites keep their frozen assignments (test
+    sites are pinned in the test suite); extension sites get val/train only,
+    drawn per stratum from the seed. One tile never crosses a split."""
+    known = {s["site_id"] for s in sites}
+    missing = sorted(set(FROZEN_SPLITS) - known)
+    if missing:
+        raise ValueError(f"frozen sites missing from the design: {missing}")
     rng = np.random.default_rng(seed)
-    assignment = {}
+    assignment = dict(FROZEN_SPLITS)
     for stratum in STRATA:
         ids = sorted(s["site_id"] for s in sites if s["stratum"] == stratum)
-        expected = sum(sizes.values())
-        if len(ids) != expected:
+        frozen = [sid for sid in ids if sid in FROZEN_SPLITS]
+        expected = sum(SPLIT_SIZES.values())
+        if len(frozen) != expected:
             raise ValueError(
-                f"stratum {stratum}: {len(ids)} sites, expected {expected}")
-        order = [ids[i] for i in rng.permutation(len(ids))]
-        start = 0
-        for split in ("test", "val", "train"):
-            take = sizes[split]
-            for site_id in order[start:start + take]:
-                assignment[site_id] = split
-            start += take
+                f"stratum {stratum}: {len(frozen)} frozen sites, "
+                f"expected {expected}")
+        extra = [sid for sid in ids if sid not in FROZEN_SPLITS]
+        if len(extra) != EXTRA_SITES_PER_STRATUM:
+            raise ValueError(
+                f"stratum {stratum}: {len(extra)} extension sites, "
+                f"expected {EXTRA_SITES_PER_STRATUM}")
+        order = [extra[i] for i in rng.permutation(len(extra))]
+        for rank, site_id in enumerate(order):
+            assignment[site_id] = ("val" if rank < EXTRA_VAL_PER_STRATUM
+                                   else "train")
     return assignment
 
 

@@ -1,28 +1,60 @@
 site_id,stratum,split,lon_wgs84,lat_wgs84,e_lv95,n_lv95,rationale
 aegeri,forest,test,8.6,47.1,2688162,1217207,mixed forest south of Unteraegeri (nDSM-verified)
+alptal,forest,val,8.65,47.05,2692043,1211707,forested pre-alpine valley slopes
+andermatt,sparse,val,8.5944,46.6356,2688497,1165580,bare pass terrain around the Gotthard
 appenzell,hilly,train,9.4,47.33,2748242,1243979,"steep meadows, scattered farms"
 arolla,sparse,test,7.48,46.03,2603202,1097607,"high glacial valley, moraine"
+arosa,forest,train,9.68,46.78,2771146,1183425,forested valley slopes above Arosa
 bachtel,forest,train,8.87,47.3,2708251,1239778,"forested ridge, mixed stands"
 basel_center,urban,train,7.5886,47.5596,2611288,1267665,city core at the Rhine
 bern_center,urban,train,7.4474,46.948,2600667,1199657,"old town, dense blocks"
+biel,urban,train,7.2467,47.1368,2585440,1220665,bilingual city on the Jura foot
+brevine,forest,train,6.6,46.98,2536194,1203557,forested Jura valley (La Brevine)
 chasseral,hilly,test,7.05,47.13,2570514,1219964,"Jura ridge, pastures"
+chur,urban,train,9.5329,46.8508,2759707,1190983,alpine city core
 emmental,hilly,val,7.7,46.95,2619897,1199913,rolling farmland hills
+entlebuch,hilly,train,8.05,46.99,2646507,1204507,pre-alpine hill country
+fluela,sparse,train,9.947,46.749,2791638,1180598,bare high pass above Davos
+fribourg,urban,val,7.162,46.8065,2578884,1183964,old town on the Sarine loop
 gantrisch,forest,val,7.45,46.72,2600869,1174311,forested pre-alpine slopes
+gempen,forest,train,7.66,47.475,2616688,1258271,wooded Gempen plateau above Basel
 geneva_center,urban,test,6.1432,46.2044,2500016,1117821,city core left of the lake
+goms,hilly,train,8.25,46.47,2662318,1146841,"upper Valais valley, meadows"
+gornergrat,sparse,val,7.785,45.983,2626842,1092441,bare high-alpine slopes above Zermatt
 grimsel,sparse,val,8.335,46.562,2668729,1157139,bare granite high plateau
+grosse_scheidegg,sparse,train,8.1,46.65,2650629,1166742,bare alpine slopes above Grindelwald
 gruyeres,hilly,train,7.08,46.58,2572510,1158811,pre-alpine pastures
+jaunpass,forest,val,7.35,46.6,2593208,1160975,forested pass slopes
+julier,sparse,train,9.7285,46.469,2775858,1148974,"bare pass terrain, Engadin side"
 la_dole,hilly,val,6.1,46.42,2497092,1141841,"Jura crest, open slopes"
+lac_dix,sparse,train,7.405,46.0854,2597397,1103766,bare rock and moraine above the Grande Dixence dam
 lausanne_center,urban,test,6.6323,46.5197,2538124,1152363,steep city above the lake
+leventina,hilly,val,8.85,46.5,2708338,1150828,steep Ticino valley slopes
+lugano,urban,val,8.9511,46.0101,2717147,1096523,city core at the lake
 luzern_center,urban,val,8.3093,47.0502,2666157,1211386,city core at the lake outlet
 maggia_valley,hilly,train,8.7,46.25,2697272,1122844,steep Ticino valley walls
+marchairuz,forest,train,6.25,46.55,2508841,1156105,Jura crest forest (col du Marchairuz)
 monte_san_giorgio,forest,train,8.945,45.905,2716899,1084832,"UNESCO beech forest, Monte San Giorgio (nDSM-verified)"
 napf,hilly,test,7.94,47.01,2638125,1206671,pre-alpine hill country
+neuchatel,urban,val,6.931,46.992,2561386,1204674,lakeside city core
+ofenpass,sparse,train,10.28,46.64,2817507,1169356,"Ofenpass, bare alpine valley walls"
+pfannenstiel,forest,train,8.65,47.28,2691648,1237274,forested ridge above the lake
 randen,forest,val,8.55,47.75,2683343,1289415,wooded Randen plateau
 saas_fee,sparse,test,7.93,46.11,2637990,1106618,"high valley, bare slopes"
 samedan,sparse,train,9.8712,46.534,2786589,1156526,open Engadin valley floor
+san_bernardino,sparse,val,9.1906,46.4622,2734573,1147154,"bare alpine pass slopes, scree"
+schaffhausen,urban,train,8.6333,47.6978,2689678,1283703,Rhine city core
+schwarzsee,hilly,train,7.2696,46.6664,2587064,1168366,pre-alpine pastures west of Schwarzsee
 sihlwald,forest,test,8.48,47.27,2678802,1235978,dense beech forest
+simmental,hilly,train,7.4,46.55,2597037,1155413,steep alpine valley meadows
 simplon,sparse,train,8.03,46.25,2645605,1122234,bare alpine pass slopes
+st_gallen,urban,train,9.3767,47.4245,2746222,1254438,"city core, dense blocks"
 susten,sparse,train,8.44,46.73,2676542,1175910,"bare pass terrain, scree"
+thun,urban,train,7.6283,46.7584,2614490,1178597,city core at the Aare outlet
+toggenburg,hilly,val,9.28,47.32,2739200,1242647,rolling pre-alpine meadows
+val_de_travers,hilly,train,6.6,46.93,2536134,1197999,"Jura valley, pastures and slopes"
+val_mustair,hilly,val,10.44,46.57,2830047,1162036,"Val Muestair, terraced pastures"
+val_onernonica,forest,val,8.55,46.35,2685547,1133785,"chestnut and beech slopes, Ticino"
 vaud_jura,forest,train,6.35,46.6,2516587,1161551,continuous Jura forest
 winterthur,urban,train,8.7241,47.4985,2696856,1261653,"city core, industrial edges"
 zermatt,sparse,val,7.7486,46.0207,2624004,1096620,"alpine village, bare valley walls"

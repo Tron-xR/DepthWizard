@@ -1,8 +1,9 @@
 # HR dataset — data sources, licences, access
 
 Scope: the Phase 2 high-resolution Swiss training/evaluation set built by
-`server/app/pipeline/hr_dataset.py` + `hr_download.py` (28 sites, 4 tiles
-each, 1 m EPSG:2056 grids), and the headroom analysis in
+`server/app/pipeline/hr_dataset.py` + `hr_download.py` (60 sites, 4 tiles
+each, 1 m EPSG:2056 grids; extended 2026-10 with 32 train/val-only sites),
+and the headroom analysis in
 `docs/benchmarks/hr_headroom.md`. Verified 2026-10; re-check upstream terms
 before redistribution.
 
@@ -51,9 +52,12 @@ before redistribution.
 - Products carry different epochs (RGB 2021–2025; swissSURFACE3D
   2020–2026). Each tile records `rgb_year`, `dsm_year`, `dtm_year`,
   `temporal_gap_years`; gaps > 4 years set `temporal_flag`.
-- Flagged tiles (6): `napf_00`, `napf_01`, `samedan_00`–`samedan_11`. They
-  are listed, kept on disk, and excluded from the headroom primary
-  aggregates; any Phase 3 primary test claim must exclude them too.
+- Flagged tiles (34): `napf_00`, `napf_01`, `samedan_*` (6 Phase-2 tiles),
+  plus 28 extension tiles where 2024–25 RGB meets 2019–23 DSM/DEM epochs
+  (`andermatt`, `arosa`, `chur`, `fluela`, `san_bernardino`, `val_mustair`,
+  `val_onernonica`). They are listed, kept on disk, and excluded from the
+  headroom primary aggregates; any Phase 3 primary test claim must exclude
+  them too.
 
 ## Water
 
@@ -73,13 +77,17 @@ uv run python -m app.pipeline.headroom --report
 ```
 
 Downloads are resumable (`.part` staging + sha256). Cache:
-`server/data/hr_downloads/` (348 files, ~11.4 GB at 2026-10); built tiles:
-`server/data/hr/` (112 tiles); provenance: `server/data/manifest_hr.csv`,
-`server/data/hr_downloads.csv`, `server/data/hr_sites.csv`.
+`server/data/hr_downloads/` (823 indexed files, ~23.7 GB at 2026-10); built
+tiles: `server/data/hr/` (240 tiles); provenance:
+`server/data/manifest_hr.csv`, `server/data/hr_downloads.csv`,
+`server/data/hr_sites.csv`.
 Coordinates come from the committed site table (`hr_sites.csv`); the
 `val_colla` forest test site was replaced by `monte_san_giorgio` after a
 coverage check showed the original point inside Italian territory (no
-swisstopo data), verified by nDSM tree-cover and STAC checks.
+swisstopo data), verified by nDSM tree-cover and STAC checks. The extension
+sites `lac_dix` and `schwarzsee` were initially placed on open water (one
+tile at ≤ 4 % valid pixels); both points were shifted using the TLMregio
+water polygons (all tiles now < 1 % water) before rebuild.
 
 ## Reference-only
 
