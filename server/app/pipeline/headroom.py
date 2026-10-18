@@ -8,8 +8,11 @@ separately:
 
   priors    real downloaded products (GLO-30 coarse, 90/250 m national DEMs)
             with their raw, datum-offset-corrected, zero-mean-oracle and
-            affine-oracle arms, a constant arm, and a perfect-terrain floor
-            from the built ndsm (dsm = dtm + ndsm by construction).
+            affine-oracle arms, a constant arm, a perfect-terrain floor from
+            the built ndsm (dsm = dtm + ndsm by construction), and two
+            composition oracles: prior_90m + true ndsm (the 90 m prior's
+            terrain error with a perfect depth model on top) and
+            prior_90m + true residual (an identity sanity check).
   backends  the four deployed/opt-in depth backends through the deployed
             calibration workflow (``evaluation.evaluate_tile_arrays``). The HR
             scenes sit far outside their training domain: these are a floor
@@ -138,6 +141,13 @@ def tile_priors(row: dict) -> dict:
     canopy_const = float(np.mean(ndsm[calib_px]))
     record["arms"]["perfect_terrain_floor"] = _arm(
         dtm + canopy_const, dem, eval_px)
+
+    prior_90 = _read(row["prior_90m_path"]).astype("float64")
+    residual = _read(row["residual_path"]).astype("float64")
+    record["arms"]["prior_90m_plus_true_ndsm"] = _arm(
+        prior_90 + ndsm, dem, eval_px)
+    record["arms"]["prior_90m_plus_true_residual"] = _arm(
+        prior_90 + residual, dem, eval_px)
 
     v_dsm = float(np.var(dem[eval_px]))
     v_dtm = float(np.var(dtm[eval_px]))
@@ -352,6 +362,12 @@ def _render_md(summary: dict) -> str:
               "affine fit estimated on calibration blocks only).",
               "- `perfect_terrain_floor` = dtm + constant canopy mean: the "
               "error a perfect terrain model with no canopy awareness leaves.",
+              "- `prior_90m_plus_true_ndsm` = prior_90m + built ndsm: where a "
+              "perfect depth model on top of the 90 m prior lands (its "
+              "terrain error untouched; oracle, uses reference heights).",
+              "- `prior_90m_plus_true_residual` = prior_90m + built residual "
+              "(= dsm_hr by construction): RMSE near 0 is a plumbing sanity "
+              "check, not a result.",
               "- Datum offsets in forest sites reflect canopy-blur in the "
               "coarse DEM over small clearings, not only the geoid; see "
               "docs/DATA_SOURCES.md.", ""]
