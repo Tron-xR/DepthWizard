@@ -712,6 +712,30 @@ def _fit_on_mask(pred, dem, mask) -> tuple:
         return None, f"calibration fit failed: {exc}"
 
 
+def _calibrated_copy(pred, reference, *, block: int = 180, guard: int = 8,
+                     calib_cap: int = 2_000_000, seed: int = 42) -> tuple:
+    """Fit pred->reference on the calibration blocks and apply it globally.
+
+    dsm mode uses this to bring a relative-depth arm (DA2/DA3/controls) into
+    metres BEFORE composing prior + nDSM, so the composed arm cannot absorb
+    any prior structure through a free fit. The fit uses the same spatial
+    block split as scoring (no eval-block leakage). Returns (array, reason);
+    array is None when the fit is unavailable and the caller skips the arm.
+    """
+    shape = np.asarray(reference).shape
+    rng = np.random.default_rng(seed)
+    calib_mask, _eval_mask = spatial_block_split(shape, block=block, guard=guard)
+    valid = np.isfinite(reference) & np.isfinite(pred)
+    calib_px = _cap_mask(calib_mask & valid, calib_cap, rng)
+    fit, error = _fit_on_mask(pred, reference, calib_px)
+    if fit is None:
+        return None, error
+    if fit.degenerate:
+        return None, calib.degenerate_reason(fit)
+    return (fit.scale * np.asarray(pred, dtype="float64") + fit.offset).astype(
+        "float32"), None
+
+
 def evaluate_tile_arrays(dem, predictions: dict, *, georef=None,
                          block: int = 180, guard: int = 8,
                          calib_cap: int = 2_000_000, seed: int = 42,
@@ -873,6 +897,136 @@ def evaluate_tile_arrays(dem, predictions: dict, *, georef=None,
                 "random_rmse": rm["rmse"], "random_r": rm["correlation"],
                 "random_reason": rm["correlation_reason"],
             })
+        record["backends"][name] = backend
+    return record
+
+
+def evaluate_metric_arrays(reference, predictions: dict, *, raw_headline=(),
+                           extra_baselines=None, block: int = 180, guard: int = 8,
+                           calib_cap: int = 2_000_000, seed: int = 42) -> dict:
+    """All arms of one tile on one shared valid-pixel mask, metric reference.
+
+    For the ndsm/dsm evaluation modes: the reference IS the ground truth
+    (Swiss nDSM or DSM, metres), so there is no reference resample and no
+    prior-degradation baseline set. Baselines: predict_zero and const_mean
+    (calibration-region reference mean) plus ``extra_baselines`` (dsm mode:
+    oracle = prior + true nDSM, prior_alone). Arm headline = direct metres for
+    names in ``raw_headline`` (metric backends' native output), else the
+    spatial-block calibrated arm (relative-depth backends and controls have no
+    metre scale without it); ``metric_*`` always carries the headline, and
+    delta/improvement links are measured from it. The calibration fit still
+    runs for raw-headline arms as a drift diagnostic (scale ~ 1 expected).
+    """
+    reference = np.asarray(reference, dtype="float32")
+    shape = reference.shape
+    rng = np.random.default_rng(seed)
+
+    preds: dict = {}
+    skipped: dict = {}
+    for name, pred in predictions.items():
+        arr = np.asarray(pred, dtype="float32")
+        if arr.shape != shape:
+            skipped[name] = f"prediction grid {arr.shape} != reference grid {shape}"
+            continue
+        preds[name] = arr
+
+    valid = np.isfinite(reference)
+    for arr in preds.values():
+        valid = valid & np.isfinite(arr)
+    for arr in (extra_baselines or {}).values():
+        valid = valid & np.isfinite(np.asarray(arr, dtype="float32"))
+
+    calib_mask, eval_mask = spatial_block_split(shape, block=block, guard=guard)
+    calib_px = calib_mask & valid
+    eval_px = eval_mask & valid
+
+    record = {
+        "shape": list(shape),
+        "n_valid": int(np.count_nonzero(valid)),
+        "n_calib_pixels": int(np.count_nonzero(calib_px)),
+        "n_eval_pixels": int(np.count_nonzero(eval_px)),
+        "reference_std": (float(np.std(reference[eval_px].astype("float64")))
+                          if int(np.count_nonzero(eval_px)) >= 2 else None),
+        "baselines": {},
+        "backends": {},
+        "skipped_backends": skipped,
+        "status": "ok" if np.any(eval_px) else "no_eval_pixels",
+    }
+
+    baselines = record["baselines"]
+    zero_stats = _arm_stats(np.zeros(shape, dtype="float32"), reference, eval_px)
+    baselines["predict_zero"] = {
+        "status": "ok", "n": zero_stats["n"], "rmse": zero_stats["rmse"],
+        "mae": zero_stats["mae"], "bias": zero_stats["bias"],
+        "r": zero_stats["correlation"], "reason": zero_stats["correlation_reason"]}
+    if np.any(calib_px):
+        const_value = float(np.mean(reference[calib_px].astype("float64")))
+        stats = _arm_stats(np.full(shape, const_value, dtype="float32"),
+                           reference, eval_px)
+        baselines["const_mean"] = {
+            "status": "ok", "value": const_value, "n": stats["n"],
+            "rmse": stats["rmse"], "mae": stats["mae"], "bias": stats["bias"],
+            "r": stats["correlation"], "reason": stats["correlation_reason"]}
+    else:
+        baselines["const_mean"] = {
+            "status": "unavailable", "reason": "no calibration pixels"}
+    for name, arr in (extra_baselines or {}).items():
+        stats = _arm_stats(np.asarray(arr, dtype="float32"), reference, eval_px)
+        baselines[name] = {
+            "status": "ok", "n": stats["n"], "rmse": stats["rmse"],
+            "mae": stats["mae"], "bias": stats["bias"],
+            "r": stats["correlation"], "reason": stats["correlation_reason"]}
+
+    calib_fit_px = _cap_mask(calib_px, calib_cap, rng)
+    for name, pred in preds.items():
+        raw = _arm_stats(pred, reference, eval_px)
+        backend: dict = {
+            "status": "ok",
+            "raw_r": raw["correlation"], "raw_r_reason": raw["correlation_reason"],
+            "raw_r_opposite": (None if raw["correlation"] is None
+                               else -raw["correlation"]),
+            "raw_mae": raw["mae"], "raw_rmse": raw["rmse"], "raw_bias": raw["bias"],
+        }
+        fit, fit_error = _fit_on_mask(pred, reference, calib_fit_px)
+        if fit is None:
+            backend.update({
+                "status": "calibration_error", "calibrated_reason": fit_error,
+                "cal_r": None, "cal_rmse": None, "cal_mae": None, "cal_bias": None,
+                "scale": None, "offset": None, "inliers": None, "warning": None,
+                "estimate_status": None, "polarity_inverted": None})
+        elif fit.degenerate:
+            backend.update({
+                "status": "failed", "calibrated_reason": calib.degenerate_reason(fit),
+                "cal_r": None, "cal_rmse": None, "cal_mae": None, "cal_bias": None,
+                "scale": fit.scale, "offset": fit.offset, "inliers": fit.n_inliers,
+                "warning": fit.calibration_warning,
+                "estimate_status": fit.estimate_status,
+                "polarity_inverted": fit.polarity_inverted})
+        else:
+            cal = _arm_stats(fit.scale * pred.astype("float64") + fit.offset,
+                             reference, eval_px)
+            backend.update({
+                "cal_r": cal["correlation"], "cal_rmse": cal["rmse"],
+                "cal_mae": cal["mae"], "cal_bias": cal["bias"],
+                "scale": fit.scale, "offset": fit.offset, "inliers": fit.n_inliers,
+                "warning": fit.calibration_warning,
+                "estimate_status": fit.estimate_status,
+                "polarity_inverted": fit.polarity_inverted,
+                "calibrated_reason": None})
+        if name in raw_headline:
+            head, source = raw, "raw"
+        elif backend["cal_rmse"] is not None:
+            head = {"rmse": backend["cal_rmse"], "mae": backend["cal_mae"],
+                    "bias": backend["cal_bias"], "correlation": backend["cal_r"]}
+            source = "calibrated"
+        else:
+            head = {"rmse": None, "mae": None, "bias": None, "correlation": None}
+            source = None
+        backend.update({
+            "metric_source": source,
+            "metric_rmse": head["rmse"], "metric_mae": head["mae"],
+            "metric_bias": head["bias"], "metric_r": head["correlation"],
+            **_baseline_links(head["rmse"], baselines)})
         record["backends"][name] = backend
     return record
 
@@ -1106,6 +1260,166 @@ def aggregate_records(tile_records, *, bootstrap_iters: int = 1000,
     }
 
 
+def _metric_failure_stats(tiles, backend: str) -> dict:
+    """Like _failure_stats but keyed on the metric headline.
+
+    A metric arm whose diagnostic-only calibration fit failed still counts as
+    measured (its raw metres are the headline); only tiles with no headline
+    metric at all count as failed.
+    """
+    counts = {"valid": 0, "low_confidence": 0, "failed": 0, "no_metrics": 0}
+    for t in tiles:
+        if t.get("status") != "ok":
+            counts["no_metrics"] += 1
+            continue
+        info = t.get("backends", {}).get(backend)
+        if info is None:
+            counts["no_metrics"] += 1
+        elif info.get("metric_rmse") is None:
+            counts["failed"] += 1
+        elif (info.get("metric_source") == "calibrated"
+              and info.get("estimate_status") == "low_confidence"):
+            counts["low_confidence"] += 1
+        else:
+            counts["valid"] += 1
+    n = len(tiles) or 1
+    counts["failure_rate"] = (counts["failed"] + counts["no_metrics"]) / n
+    counts["low_confidence_rate"] = counts["low_confidence"] / n
+    counts["unusable_rate"] = ((counts["failed"] + counts["no_metrics"]
+                                + counts["low_confidence"]) / n)
+    return counts
+
+
+def aggregate_metric_records(tile_records, *, bootstrap_iters: int = 1000,
+                             seed: int = 42) -> dict:
+    """Site-weighted metric aggregates (ndsm/dsm modes) + failure counts.
+
+    Same site weighting / bootstrap machinery as aggregate_records; the
+    headline is the direct metric arm (metric_*) and the reference baseline is
+    predict_zero (skill = 1 - RMSE/RMSE_zero, site-weighted). Contaminated
+    arms (finetuned) are reported but excluded from the primary-arm choice.
+    """
+    backends = sorted({b for t in tile_records for b in t.get("backends", {})})
+    sites = sorted({t["site_id"] for t in tile_records})
+    strata = sorted({t["stratum"] for t in tile_records})
+
+    def baseline_weighted(tiles, name, key):
+        per_site: dict = {}
+        for t in tiles:
+            value = ((t.get("baselines") or {}).get(name) or {}).get(key)
+            if value is not None:
+                per_site.setdefault(t["site_id"], []).append(value)
+        site_means = [float(np.mean(v)) for v in per_site.values()]
+        return float(np.mean(site_means)) if site_means else None
+
+    def arm_summary(tiles, backend):
+        source = next(
+            (t.get("backends", {}).get(backend, {}).get("metric_source")
+             for t in tiles
+             if t.get("backends", {}).get(backend, {}).get("metric_source")), None)
+        summary = {
+            "metric_source": source,
+            "metric_rmse": _site_weighted(tiles, backend, "metric_rmse"),
+            "metric_mae": _site_weighted(tiles, backend, "metric_mae"),
+            "metric_bias": _site_weighted(tiles, backend, "metric_bias"),
+            "metric_r": _site_weighted(tiles, backend, "metric_r"),
+            "raw_r": _site_weighted(tiles, backend, "raw_r"),
+            "raw_r_opposite": _site_weighted(tiles, backend, "raw_r_opposite"),
+            "cal_rmse": _site_weighted(tiles, backend, "cal_rmse"),
+            "scale": _site_weighted(tiles, backend, "scale"),
+            "offset": _site_weighted(tiles, backend, "offset"),
+            "n_tiles": len(tiles),
+            "n_sites": len({t["site_id"] for t in tiles}),
+            "failures": _metric_failure_stats(tiles, backend),
+        }
+        for name in sorted({n for t in tiles for n in (t.get("baselines") or {})}):
+            for prefix in ("delta_vs_", "improvement_vs_"):
+                summary[prefix + name] = _site_weighted(tiles, backend,
+                                                        prefix + name)
+        zero = baseline_weighted(tiles, "predict_zero", "rmse")
+        summary["skill_vs_predict_zero"] = (
+            1.0 - summary["metric_rmse"] / zero
+            if summary["metric_rmse"] is not None and zero else None)
+        return summary
+
+    def contaminated_set(tiles):
+        flagged = set()
+        for t in tiles:
+            flagged.update(t.get("contaminated_arms") or [])
+        return flagged or set(_CONTAMINATED_ARMS)
+
+    contaminated = contaminated_set(tile_records)
+    overall_arms = {b: {**arm_summary(tile_records, b),
+                        "contaminated": b in contaminated}
+                    for b in backends}
+    per_stratum = {}
+    for stratum in strata:
+        tiles = [t for t in tile_records if t["stratum"] == stratum]
+        per_stratum[stratum] = {
+            "n_tiles": len(tiles),
+            "n_sites": len({t["site_id"] for t in tiles}),
+            "arms": {b: arm_summary(tiles, b) for b in backends},
+        }
+    available = [b for b, s in overall_arms.items()
+                 if s["metric_rmse"] is not None and not s["contaminated"]]
+    primary = (min(available, key=lambda b: overall_arms[b]["metric_rmse"])
+               if available else None)
+
+    baselines_out = {}
+    for name in sorted({n for t in tile_records
+                        for n in (t.get("baselines") or {})}):
+        sample = next(((t.get("baselines") or {}).get(name) for t in tile_records
+                       if (t.get("baselines") or {}).get(name)), {}) or {}
+        baselines_out[name] = {
+            "res_m": sample.get("res_m"),
+            "value": baseline_weighted(tile_records, name, "value"),
+            "rmse": baseline_weighted(tile_records, name, "rmse"),
+            "mae": baseline_weighted(tile_records, name, "mae"),
+            "bias": baseline_weighted(tile_records, name, "bias"),
+            "r": baseline_weighted(tile_records, name, "r"),
+            "n_tiles": sum(1 for t in tile_records
+                           if ((t.get("baselines") or {}).get(name) or {})
+                           .get("status") == "ok"),
+        }
+
+    def site_values(tiles, backend, key):
+        per_site: dict = {}
+        for t in tiles:
+            value = t.get("backends", {}).get(backend, {}).get(key)
+            if value is not None:
+                per_site.setdefault(t["site_id"], []).append(value)
+        return {site: float(np.mean(v)) for site, v in per_site.items()}
+
+    bootstrap = {}
+    for b in backends:
+        if overall_arms[b]["metric_rmse"] is None:
+            continue
+        bootstrap[b] = {
+            "metric_rmse": _bootstrap_ci(
+                site_values(tile_records, b, "metric_rmse").values(),
+                iterations=bootstrap_iters, seed=seed),
+            "metric_r": _bootstrap_ci(
+                site_values(tile_records, b, "metric_r").values(),
+                iterations=bootstrap_iters, seed=seed),
+            "raw_r": _bootstrap_ci(
+                site_values(tile_records, b, "raw_r").values(),
+                iterations=bootstrap_iters, seed=seed),
+            "skill_vs_predict_zero": _bootstrap_ci(
+                site_values(tile_records, b,
+                            "improvement_vs_predict_zero").values(),
+                iterations=bootstrap_iters, seed=seed),
+        }
+    return {
+        "n_tiles": len(tile_records),
+        "n_sites": len(sites),
+        "arms": overall_arms,
+        "baselines": baselines_out,
+        "per_stratum": per_stratum,
+        "primary_arm": primary,
+        "bootstrap": bootstrap,
+    }
+
+
 def _sha256(path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as fh:
@@ -1135,7 +1449,7 @@ def _provenance(manifest_path, acceptance_path, run_dirs) -> dict:
         "git_dirty": dirty,
         "repo_root": str(_REPO_ROOT),
         "manifest_sha256": _sha256(manifest_path),
-        "acceptance_sha256": _sha256(acceptance_path),
+        "acceptance_sha256": _sha256(acceptance_path) if acceptance_path else None,
         "python": sys.version.split()[0],
         "numpy": np.__version__,
         "rasterio": rasterio.__version__,
@@ -1616,6 +1930,343 @@ def run_benchmark(args) -> dict:
     return payload
 
 
+_HEIGHT_MANIFEST_COLUMNS = ("tile_id", "site_id", "stratum", "split",
+                            "ndsm_path", "dsm_path", "prior_path", "notes")
+
+
+def load_height_manifest(path) -> list:
+    """Read the ndsm/dsm-mode height manifest CSV.
+
+    Required column: tile_id. Optional: site_id/stratum (default "unknown"),
+    split, notes, and the reference paths - ndsm_path (nDSM reference; needed
+    by ndsm mode and to calibrate relative arms in dsm mode), dsm_path and
+    prior_path (needed by dsm mode). Relative paths resolve against the
+    manifest's directory. Schema is deliberately loose until the Phase 2
+    Swiss sites land; a row missing a path the mode requires fails loudly.
+    """
+    path = Path(path)
+    with path.open(newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    if not rows:
+        raise ManifestError(f"height manifest is empty: {path}")
+    if "tile_id" not in rows[0]:
+        raise ManifestError(
+            f"height manifest needs a tile_id column, got {list(rows[0])}")
+    for row in rows:
+        for key in ("ndsm_path", "dsm_path", "prior_path"):
+            value = (row.get(key) or "").strip()
+            if value and not Path(value).is_absolute():
+                row[key] = str((path.parent / value).resolve())
+    return rows
+
+
+def run_height_benchmark(args) -> dict:
+    """The `benchmark --mode ndsm|dsm` body: height manifest -> predictions.
+
+    Prediction dirs use the same defaults/--predictions overrides as the rdsm
+    protocol. Per tile, a metric backend's file is <tile>_ndsm.npy (raw
+    metres, headline = raw) and a relative-depth arm's is
+    <tile>_relative.npy (headline = calibrated against the nDSM reference).
+    dsm mode composes every arm as prior + predicted nDSM - metric arms
+    directly, relative arms after calibrating against ndsm_path - and adds
+    oracle (prior + true nDSM) and prior_alone baselines. Nothing is ever
+    subtracted from the prior.
+    """
+    from . import dem_source
+
+    mode = args.mode
+    if not args.height_manifest:
+        raise SystemExit(f"--mode {mode} needs --height-manifest")
+    manifest_path = Path(args.height_manifest)
+    if not manifest_path.is_file():
+        raise SystemExit(f"height manifest not found: {manifest_path}")
+    rows = load_height_manifest(manifest_path)
+
+    run_dirs: dict = {}
+    for name, rel in _DEFAULT_PREDICTION_RUNS.items():
+        path = Path(rel)
+        run_dirs[name] = path if path.is_absolute() else _REPO_ROOT / path
+    for override in args.predictions or []:
+        name, sep, path = override.partition("=")
+        if not sep or not name or not path:
+            raise SystemExit(f"--predictions expects BACKEND=DIR, got {override!r}")
+        run_dirs[name] = Path(path)
+
+    from .depth import RS_BACKENDS
+
+    licenses = {slug: note for slug, _attr, _repo, _fn, note in RS_BACKENDS}
+    need = {"ndsm": ("ndsm_path",), "dsm": ("dsm_path", "prior_path")}[mode]
+    for row in rows:
+        missing = [c for c in need if not (row.get(c) or "").strip()]
+        if missing:
+            raise SystemExit(f"height manifest row {row.get('tile_id')!r} lacks "
+                             f"{missing} required by --mode {mode}")
+
+    availability = {name: {"dir": str(d), "tiles_present": 0, "tiles_missing": 0}
+                    for name, d in run_dirs.items()}
+    tile_records = []
+    for row in rows:
+        tile_id = row["tile_id"]
+        meta_cols = {
+            "tile_id": tile_id,
+            "site_id": (row.get("site_id") or "unknown").strip() or "unknown",
+            "stratum": (row.get("stratum") or "unknown").strip() or "unknown",
+            "split": (row.get("split") or "").strip(),
+            "notes": row.get("notes", ""),
+            "contaminated_arms": [],
+        }
+        try:
+            if mode == "ndsm":
+                reference, _meta = dem_source._read_local_geotiff(row["ndsm_path"])
+                ndsm = reference
+                prior = None
+            else:
+                dsm, _meta = dem_source._read_local_geotiff(row["dsm_path"])
+                prior, _pmeta = dem_source._read_local_geotiff(row["prior_path"])
+                reference = dsm
+                ndsm = (dem_source._read_local_geotiff(row["ndsm_path"])[0]
+                        if (row.get("ndsm_path") or "").strip() else None)
+        except Exception as exc:
+            tile_records.append({
+                **meta_cols, "status": "missing_reference", "shape": None,
+                "n_valid": 0, "n_calib_pixels": 0, "n_eval_pixels": 0,
+                "reference_std": None, "baselines": {}, "backends": {},
+                "skipped_backends": {}})
+            print(f"[skip] {tile_id}: reference read failed ({exc})")
+            continue
+
+        preds: dict = {}
+        raw_headline = set()
+        skipped_files: dict = {}
+        for name, run_dir in run_dirs.items():
+            f_metric = run_dir / "predictions" / f"{tile_id}_ndsm.npy"
+            f_rel = run_dir / "predictions" / f"{tile_id}_relative.npy"
+            if f_metric.exists():
+                pred, is_metric = np.load(f_metric), True
+            elif f_rel.exists():
+                pred, is_metric = np.load(f_rel), False
+            else:
+                availability[name]["tiles_missing"] += 1
+                continue
+            availability[name]["tiles_present"] += 1
+            if mode == "ndsm":
+                preds[name] = pred
+                if is_metric:
+                    raw_headline.add(name)
+                continue
+            # dsm mode: compose prior + predicted nDSM (never subtract).
+            if pred.shape != reference.shape:
+                skipped_files[name] = (f"prediction grid {pred.shape} != "
+                                       f"reference grid {reference.shape}")
+                continue
+            if prior.shape != reference.shape:
+                skipped_files[name] = (f"prior grid {prior.shape} != "
+                                       f"reference grid {reference.shape}")
+                continue
+            if is_metric:
+                arm = prior + pred
+            else:
+                if ndsm is None:
+                    skipped_files[name] = ("no ndsm_path to calibrate a "
+                                           "relative-depth arm against")
+                    continue
+                cal_arr, reason = _calibrated_copy(
+                    pred, ndsm, block=args.block, guard=args.guard,
+                    calib_cap=args.calib_cap, seed=args.seed)
+                if cal_arr is None:
+                    skipped_files[name] = f"calibration unavailable: {reason}"
+                    continue
+                arm = prior + cal_arr
+            preds[name] = np.asarray(arm, dtype="float32")
+            if is_metric:
+                raw_headline.add(name)
+
+        extra = {}
+        if mode == "dsm":
+            if ndsm is not None:
+                extra["oracle"] = np.asarray(prior + ndsm, dtype="float32")
+            extra["prior_alone"] = np.asarray(prior, dtype="float32")
+
+        record = evaluate_metric_arrays(
+            reference, preds, raw_headline=raw_headline, extra_baselines=extra,
+            block=args.block, guard=args.guard, calib_cap=args.calib_cap,
+            seed=args.seed)
+        record.update(meta_cols)
+        record["skipped_backends"].update(skipped_files)
+        tile_records.append(record)
+    for name, info in availability.items():
+        if "tiles_present" in info:
+            info["provided"] = True
+            info["status"] = ("unavailable" if info["tiles_present"] == 0
+                              else "partial" if info["tiles_missing"]
+                              else "complete")
+
+    aggregate = aggregate_metric_records(tile_records,
+                                         bootstrap_iters=args.bootstrap_iters,
+                                         seed=args.seed)
+    payload = {
+        "meta": _provenance(manifest_path, None, run_dirs),
+        "height_manifest": {"path": str(manifest_path),
+                            "sha256": _sha256(manifest_path),
+                            "n_tiles": len(rows),
+                            "columns": sorted(rows[0].keys())},
+        "run": {"mode": mode, "tiles_evaluated": len(tile_records),
+                "block": args.block, "guard": args.guard,
+                "calib_cap": args.calib_cap, "seed": args.seed,
+                "bootstrap_iters": args.bootstrap_iters,
+                "licenses": {name: licenses[name] for name in run_dirs
+                             if name in licenses},
+                "raw_headline_arms": sorted(raw_headline)},
+        "availability": availability,
+        "aggregate": aggregate,
+        "tiles": tile_records,
+    }
+
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "height_benchmark.json").write_text(
+        json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    _write_height_per_tile_csv(out_dir / "height_per_tile.csv", tile_records)
+    _write_height_markdown(out_dir / "height_benchmark.md", payload)
+    print(f"[benchmark:{mode}] primary_arm={aggregate['primary_arm']} "
+          f"sites={aggregate['n_sites']} tiles={aggregate['n_tiles']} "
+          f"-> {out_dir}")
+    return payload
+
+
+def _write_height_per_tile_csv(path: Path, tile_records) -> None:
+    columns = ["tile_id", "site_id", "stratum", "split", "backend", "status",
+               "metric_source", "metric_rmse", "metric_mae", "metric_bias",
+               "metric_r", "raw_r", "raw_r_opposite", "scale", "offset",
+               "estimate_status", "calibrated_reason",
+               "improvement_vs_predict_zero", "notes"]
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=columns, lineterminator="\n")
+        writer.writeheader()
+        for t in tile_records:
+            base = {"tile_id": t.get("tile_id"), "site_id": t.get("site_id"),
+                    "stratum": t.get("stratum"), "split": t.get("split"),
+                    "notes": t.get("notes", "")}
+            rows = [{**base, **info, "backend": name}
+                    for name, info in (t.get("backends") or {}).items()]
+            rows += [{**base, "backend": name, "status": info.get("status"),
+                      "metric_source": "baseline", "metric_rmse": info.get("rmse"),
+                      "metric_mae": info.get("mae"), "metric_bias": info.get("bias"),
+                      "metric_r": info.get("r"),
+                      "calibrated_reason": info.get("reason")}
+                     for name, info in (t.get("baselines") or {}).items()]
+            rows += [{**base, "backend": name, "status": "grid_mismatch",
+                      "calibrated_reason": reason}
+                     for name, reason in (t.get("skipped_backends") or {}).items()]
+            if not rows:
+                rows.append({**base, "backend": "",
+                             "status": t.get("status", "no_predictions")})
+            for row in rows:
+                writer.writerow({c: _fmt(row.get(c)) for c in columns})
+
+
+def _write_height_markdown(path: Path, payload) -> None:
+    meta, agg = payload["meta"], payload["aggregate"]
+    run = payload["run"]
+    mode = run["mode"]
+    arm = agg["primary_arm"]
+    lines = [
+        f"# DepthWizard benchmark - {mode} mode",
+        "",
+        f"- git `{meta['git_commit']}` (dirty: {meta['git_dirty']})",
+        f"- height manifest `{payload['height_manifest']['path']}` sha256 "
+        f"`{meta['manifest_sha256'][:12]}`",
+        f"- {agg['n_tiles']} tiles / {agg['n_sites']} sites; block="
+        f"{run['block']} guard={run['guard']} calib_cap={run['calib_cap']} "
+        f"seed={run['seed']}",
+        "- headline: predicted nDSM in metres vs the reference on one shared "
+        "valid mask; skill measured against the predict-zero baseline",
+        f"- primary arm (lowest site-weighted RMSE): `{arm}`",
+        "",
+        "## Overall (site-weighted means)",
+        "",
+        _md_table(
+            ["arm", "headline", "RMSE (m)", "MAE (m)", "bias (m)", "r",
+             "raw r", "raw r (opposite sign)", "scale",
+             "skill vs predict_zero", "delta vs predict_zero (m)",
+             "valid/low/failed/no_metrics", "failure rate"],
+            [[name + (" *" if s.get("contaminated") else ""),
+              s["metric_source"], s["metric_rmse"], s["metric_mae"],
+              s["metric_bias"], s["metric_r"], s["raw_r"], s["raw_r_opposite"],
+              s["scale"], s["skill_vs_predict_zero"],
+              s.get("delta_vs_predict_zero"),
+              "{valid}/{low_confidence}/{failed}/{no_metrics}".format(
+                  **s["failures"]),
+              s["failures"]["failure_rate"]]
+             for name, s in agg["arms"].items()]),
+        "",
+        "`headline` = which arm the RMSE column comes from: `raw` = direct "
+        "metres output (metric checkpoints), `calibrated` = spatial-block "
+        "affine fit (relative-depth backends/control arms, whose pixels have "
+        "no metre scale otherwise).",
+        "",
+    ]
+    base_rows = [[name, b["value"], b["rmse"], b["mae"], b["bias"], b["r"],
+                  b["n_tiles"]]
+                 for name, b in agg["baselines"].items()]
+    lines += [
+        "## Baselines (site-weighted)",
+        "",
+        _md_table(["baseline", "value (m)", "RMSE (m)", "MAE (m)", "bias (m)",
+                   "r vs reference", "tiles"], base_rows),
+        "",
+    ]
+    if arm is not None:
+        lines += [
+            "## Per stratum (primary arm)",
+            "",
+            _md_table(
+                ["stratum", "tiles", "sites", "RMSE (m)", "bias (m)", "raw r",
+                 "skill vs predict_zero", "failure rate"],
+                [[st, v["n_tiles"], v["n_sites"],
+                  v["arms"][arm]["metric_rmse"], v["arms"][arm]["metric_bias"],
+                  v["arms"][arm]["raw_r"],
+                  v["arms"][arm]["skill_vs_predict_zero"],
+                  v["arms"][arm]["failures"]["failure_rate"]]
+                 for st, v in agg["per_stratum"].items()]),
+            "",
+        ]
+    boot_rows = []
+    for name, block in agg["bootstrap"].items():
+        for metric, ci in block.items():
+            boot_rows.append([name, metric, ci["mean"], ci["ci_low"],
+                              ci["ci_high"], ci["n_sites"], ci["iters"]])
+    lines += ["## Bootstrap (95% CI over sites)", "",
+              _md_table(["arm", "metric", "mean", "ci low", "ci high",
+                         "n sites", "iters"], boot_rows), ""]
+
+    caveats = []
+    if run["licenses"]:
+        for name, note in run["licenses"].items():
+            caveats.append(f"{name} licence: {note}.")
+    if mode == "dsm":
+        caveats.append(
+            "dsm mode composes arms as prior + predicted nDSM and never "
+            "subtracts from the prior. Double-counting check: `oracle` = "
+            "prior + true nDSM (the ceiling if the nDSM were perfect); if an "
+            "arm's RMSE approaches `prior_alone`, its extra height mostly "
+            "re-explains terrain the prior already carries.")
+    caveats.append(
+        "relative-depth arms (headline `calibrated`) are fitted to the "
+        "reference on the calibration blocks only (spatial split, same "
+        "guard band as the rdsm protocol); metric arms are scored raw, their "
+        "`scale` column is a drift diagnostic (~1 expected), never a "
+        "correction.")
+    caveats.append(
+        "this mode is diagnostic. Acceptance stays the frozen Phase 1b rdsm "
+        "protocol; nothing here tunes on the test split.")
+    caveats.append(
+        "failed / low_confidence tiles remain in every count; failure_rate = "
+        "(failed + no_metrics) / tiles.")
+    lines += ["## Caveats", ""] + [f"- {c}" for c in caveats] + [""]
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
 def _build_benchmark_parser():
     import argparse
 
@@ -1646,13 +2297,25 @@ def _build_benchmark_parser():
                             "metres; the first value is the acceptance baseline")
     bench.add_argument("--seed", type=int, default=42)
     bench.add_argument("--guard-km", type=float, default=10.0)
+    bench.add_argument("--mode", default="rdsm", choices=("rdsm", "ndsm", "dsm"),
+                       help="rdsm = frozen Phase 1b protocol (default); ndsm/dsm "
+                            "= metric height evaluation against --height-manifest "
+                            "(predicted nDSM vs Swiss nDSM / prior+nDSM vs DSM)")
+    bench.add_argument("--height-manifest", default=None,
+                       help="CSV with tile_id,ndsm_path,dsm_path,prior_path for "
+                            "--mode ndsm|dsm (required there)")
+    bench.add_argument("--bootstrap-iters", type=int, default=1000,
+                       help="bootstrap CI iterations for --mode ndsm|dsm")
     return parser
 
 
 def main(argv=None) -> int:
     args = _build_benchmark_parser().parse_args(argv)
     if args.command == "benchmark":
-        run_benchmark(args)
+        if args.mode == "rdsm":
+            run_benchmark(args)
+        else:
+            run_height_benchmark(args)
         return 0
     return 2
 
