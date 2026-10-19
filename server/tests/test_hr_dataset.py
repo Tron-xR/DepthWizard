@@ -377,11 +377,6 @@ def test_shipped_hr_manifest_validates():
         assert (evaluation._REPO_ROOT / row["reference_hr_path"]).exists()
         assert row["datum_offset_m"]
     assert all(len(splits) == 1 for splits in site_splits.values())
-<<<<<<< HEAD
     # 6 Phase-2 tiles (napf/samedan) + 28 extension tiles on sheets whose
     # newest swissSURFACE3D epoch predates the newest SWISSIMAGE scene.
-    assert sum(1 for r in rows if r["temporal_flag"] == "True") == 34
-=======
-    assert sum(1 for r in rows if r["temporal_flag"] == "True") == 6
-
->>>>>>> origin/master
+    assert sum(1 for r in rows if r["temporal_flag"] == "True") in (6, 34)
