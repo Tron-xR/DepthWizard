@@ -339,6 +339,12 @@ def run_validation(job_id: str, *, save_artifacts: bool = False) -> dict:
         rmse=metrics["rmse"],
         mae=metrics["mae"],
         correlation=metrics["correlation"],
+        raw_correlation=raw_corr_signed,
+        scale_sign=scale_sign,
+        polarity_inverted=polarity_inverted,
+        calibration_warning=calib_warning,
+        estimate_status=(fit.estimate_status if fit is not None else None),
+        bias=bias,
     )
 
     return {

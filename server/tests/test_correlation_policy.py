@@ -99,6 +99,12 @@ def test_f_negative_correlation_kept_and_fit_flagged():
     assert cal["correlation"] == pytest.approx(1.0, abs=1e-6)
     assert cal["calibration_scale"] == pytest.approx(-100.0, abs=1e-3)
     assert cal["calibration_warning"] == "negative_scale"
+    # The diagnostics the results UI now reads directly: the raw signal stays
+    # negative, the fitted scale sign is explicit, and the fit is low-confidence.
+    assert cal["raw_correlation_signed"] == pytest.approx(-1.0, abs=1e-6)
+    assert cal["scale_sign"] == "-"
+    assert cal["polarity_inverted"] is True
+    assert cal["estimate_status"] == "low_confidence"
 
 
 # ---- near-constant prediction is a warning on a VALID fit -------------------- #

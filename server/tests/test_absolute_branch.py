@@ -95,6 +95,12 @@ def test_validation_endpoint(geo_environment, monkeypatch):
     assert evs[0]["landscape_type"] is None
     assert evs[0]["reference_source"] == "local"
     assert evs[0]["rmse"] == data["rmse"]
+    assert evs[0]["raw_correlation"] == data["raw_correlation_signed"]
+    assert evs[0]["scale_sign"] == data["scale_sign"]
+    assert evs[0]["polarity_inverted"] == data["polarity_inverted"]
+    assert evs[0]["calibration_warning"] == data["calibration_warning"]
+    assert evs[0]["estimate_status"] == data["estimate_status"]
+    assert evs[0]["bias"] == data["bias"]
 
 
 def test_validation_save_artifacts(geo_environment, monkeypatch):
