@@ -6,6 +6,7 @@ with row wrappers is sufficient (no ORM). All methods are synchronous.
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -56,7 +57,13 @@ CREATE TABLE IF NOT EXISTS evaluation_results (
     landscape_type TEXT,
     rmse REAL,
     mae REAL,
-    correlation REAL
+    correlation REAL,
+    raw_correlation REAL,
+    scale_sign TEXT,
+    polarity_inverted INTEGER,
+    calibration_warning TEXT,
+    estimate_status TEXT,
+    bias REAL
 );
 """
 
@@ -87,9 +94,28 @@ def connect(db_path: Optional[Any] = None) -> Iterator[sqlite3.Connection]:
         con.close()
 
 
+_EVALUATION_DIAGNOSTIC_COLUMNS = (
+    ("raw_correlation", "REAL"),
+    ("scale_sign", "TEXT"),
+    ("polarity_inverted", "INTEGER"),
+    ("calibration_warning", "TEXT"),
+    ("estimate_status", "TEXT"),
+    ("bias", "REAL"),
+)
+
+
 def init_db(db_path: Optional[Any] = None) -> None:
     with connect(db_path) as con:
         con.executescript(SCHEMA)
+        existing = {
+            row["name"]
+            for row in con.execute("PRAGMA table_info(evaluation_results)")
+        }
+        for name, decl in _EVALUATION_DIAGNOSTIC_COLUMNS:
+            if name not in existing:
+                con.execute(
+                    f"ALTER TABLE evaluation_results ADD COLUMN {name} {decl}"
+                )
 
 
 # --------------------------------------------------------------------------- #
@@ -230,6 +256,12 @@ def create_evaluation(
     rmse: Optional[float] = None,
     mae: Optional[float] = None,
     correlation: Optional[float] = None,
+    raw_correlation: Optional[float] = None,
+    scale_sign: Optional[str] = None,
+    polarity_inverted: Optional[bool] = None,
+    calibration_warning: Optional[str] = None,
+    estimate_status: Optional[str] = None,
+    bias: Optional[float] = None,
     db_path: Optional[Any] = None,
 ) -> dict:
     row = {
@@ -240,13 +272,25 @@ def create_evaluation(
         "rmse": rmse,
         "mae": mae,
         "correlation": correlation,
+        "raw_correlation": _finite_or_none(raw_correlation),
+        "scale_sign": scale_sign or None,
+        "polarity_inverted": (
+            None if polarity_inverted is None else int(bool(polarity_inverted))
+        ),
+        "calibration_warning": calibration_warning or None,
+        "estimate_status": estimate_status or None,
+        "bias": _finite_or_none(bias),
     }
     with connect(db_path) as con:
         con.execute(
             """INSERT INTO evaluation_results
-               (id, result_id, reference_source, landscape_type, rmse, mae, correlation)
+               (id, result_id, reference_source, landscape_type, rmse, mae,
+                correlation, raw_correlation, scale_sign, polarity_inverted,
+                calibration_warning, estimate_status, bias)
                VALUES (:id, :result_id, :reference_source, :landscape_type,
-                :rmse, :mae, :correlation)""",
+                :rmse, :mae, :correlation, :raw_correlation, :scale_sign,
+                :polarity_inverted, :calibration_warning, :estimate_status,
+                :bias)""",
             row,
         )
     return _row_to_dict(row)
@@ -270,9 +314,18 @@ def _decode_row(row: Optional[sqlite3.Row]) -> Optional[dict]:
     # normalize integer booleans
     if "is_georeferenced" in d and d["is_georeferenced"] is not None:
         d["is_georeferenced"] = bool(d["is_georeferenced"])
+    if d.get("polarity_inverted") is not None:
+        d["polarity_inverted"] = bool(d["polarity_inverted"])
     if d.get("bounds"):
         d["bounds"] = json.loads(d["bounds"])
     return d
+
+
+def _finite_or_none(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    value = float(value)
+    return value if math.isfinite(value) else None
 
 
 def _row_to_dict(row: dict) -> dict:

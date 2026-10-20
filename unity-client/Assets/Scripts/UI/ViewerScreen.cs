@@ -478,12 +478,24 @@ namespace DepthWizard.UI
                         string reason = string.IsNullOrEmpty(resp.calibration_warning)
                             ? "check the calibration warnings"
                             : resp.calibration_warning;
+                        string rawLine = "";
+                        if (resp.hasRawCorrelation
+                            && !float.IsNaN(resp.raw_correlation_signed)
+                            && !float.IsInfinity(resp.raw_correlation_signed))
+                        {
+                            string polarity = resp.hasPolarityInverted && resp.polarity_inverted
+                                ? " | Polarity inverted"
+                                : (resp.scale_sign == "-" ? " | Negative calibration scale" : "");
+                            string sign = resp.raw_correlation_signed >= 0 ? "+" : "";
+                            rawLine = $"\nRaw correlation: {sign}{resp.raw_correlation_signed:F3}{polarity}";
+                        }
                         _validationResultText.color = _warningColor;
                         _validationResultText.text =
                             $"Low-confidence calibration \u2014 {reason}\n" +
                             $"RMSE: {resp.rmse:F2} m\n" +
                             $"MAE: {resp.mae:F2} m\n" +
-                            $"Correlation: {resp.correlation:F3} (flagged estimate)";
+                            $"Calibrated correlation: {resp.correlation:F3} (flagged estimate)" +
+                            rawLine;
                     }
                     else
                     {
